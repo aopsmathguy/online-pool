@@ -34,7 +34,7 @@ export function getViewMode() { return viewMode; }
 const FREE_SENS_X = 0.0025;     // radians per pixel, look yaw
 const FREE_SENS_Y = 0.0022;     // radians per pixel, look pitch
 const FREE_PITCH_LIMIT = 1.5;   // clamp shy of straight up/down (~86°)
-const FREE_SPEED = 1.6;         // metres per second of WASD + Space/Shift travel
+const FREE_SPEED = 0.9;         // metres per second of WASD + Space/Shift travel
 const freeCam = { x: 0, y: 1, z: 0, yaw: 0, pitch: 0 };
 
 // Scroll-wheel dolly. The wheel moves a *target* (throttled in input.js); the

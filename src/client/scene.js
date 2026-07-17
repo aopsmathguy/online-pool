@@ -20,7 +20,7 @@ export function initScene() {
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
   renderer.shadowMap.enabled = true;
 
-  perspCamera = new THREE.PerspectiveCamera(60, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.01, 100);
+  perspCamera = new THREE.PerspectiveCamera(45, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.01, 100);
   perspCamera.position.set(-tableW * 0.5, 0.4, 0);
   perspCamera.lookAt(0, 0, 0);
 
