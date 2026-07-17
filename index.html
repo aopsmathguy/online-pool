@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Online Pool — 8-Ball / 9-Ball</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <!-- schemapack.js does `import { Buffer } from 'buffer'`; map it to our shim. -->
+  <script type="importmap">
+    { "imports": { "buffer": "/lib/buffer.js" } }
+  </script>
+</head>
+<body>
+  <!-- ===== Menu ===== -->
+  <div id="menu" class="overlay">
+    <div class="panel">
+      <h1>Online Pool</h1>
+      <label class="field">Your name
+        <input id="nameInput" type="text" maxlength="16" placeholder="Player" />
+      </label>
+      <label class="field">Game
+        <select id="gameSelect">
+          <option value="0">8-Ball</option>
+          <option value="1">9-Ball</option>
+        </select>
+      </label>
+      <div class="btnRow">
+        <button id="btnCreate">Create Room</button>
+        <button id="btnQuick">Quick Play</button>
+        <button id="btnBot">vs Computer</button>
+      </div>
+      <div class="divider"><span>or join with a code</span></div>
+      <div class="btnRow">
+        <input id="codeInput" type="text" maxlength="4" placeholder="CODE" class="codeField" />
+        <button id="btnJoin">Join</button>
+      </div>
+      <div id="menuMsg" class="menuMsg"></div>
+    </div>
+  </div>
+
+  <!-- ===== Lobby (waiting) ===== -->
+  <div id="lobby" class="overlay hidden">
+    <div class="panel">
+      <h1>Waiting for opponent…</h1>
+      <p>Share this room code:</p>
+      <div id="lobbyCode" class="bigCode">----</div>
+      <button id="btnLeaveLobby">Cancel</button>
+    </div>
+  </div>
+
+  <!-- ===== Game (rendered behind the menu overlay until a match starts) ===== -->
+  <div id="game" class="wrap">
+    <div class="stageWrap">
+      <canvas id="stage"></canvas>
+      <div id="banner"></div>
+    </div>
+    <aside>
+      <h2>Online Pool</h2>
+      <div id="turnInfo"></div>
+      <!-- Bot games only: main.js moves this inside the Computer's player chip. -->
+      <div id="botSkillWrap" class="hidden">
+        <span>Difficulty</span>
+        <input id="botSkillSlider" type="range" min="0" max="100" value="50" />
+      </div>
+      <div id="groupInfo"></div>
+      <div id="gameMsg"></div>
+      <div class="btnRow">
+        <button id="btnNewGame">New Game</button>
+        <button id="btnLeaveGame">Leave</button>
+      </div>
+      <div id="viewInfo">View: <b id="viewName">Aim</b> <span>(V to cycle)</span></div>
+      <p>Move mouse to aim (only while sighting down the cue), hold left-click to draw
+      the cue back, release to shoot. Hold <b>ALT</b> + move mouse to set spin (<b>X</b>
+      resets). <b>V</b> cycles the camera: down-the-stick aim → free fly-around
+      (mouse looks, <b>WASD</b> move, <b>Space</b>/<b>Shift</b> up/down) → overhead. Click
+      the table to lock the mouse; ESC releases it.</p>
+      <p>After a foul the other player gets <b>ball in hand</b> (overhead view — move
+      the mouse to position the cue ball, then click to place it).</p>
+      <h3>Spin</h3>
+      <div id="strikeWidget"><div id="strikeDot"></div></div>
+      <h3>Power</h3>
+      <div id="powerBar"><div id="powerCover"></div></div>
+      <h3 id="pocketedTitle">Pocketed</h3>
+      <div id="pocketed">(none)</div>
+    </aside>
+  </div>
+
+  <!-- Ammo global (wasm build) for the client renderer is NOT needed: the client
+       has no physics. Only Three + the networked modules run here. -->
+  <script type="module" src="./lib/three.module.js"></script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
