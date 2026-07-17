@@ -9,17 +9,21 @@
 import {
   tableW, tableH, FIXED_DT, wireY, rodR, R, m, g, RACK_QUAT,
   e_rail, e_table, e_pocket, mu_wall, mu_ground, mu_pocket,
-} from './constants.js';
+} from '../shared/constants.js';
 import {
   createWorld, createRigidBody, setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
   CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, MASK_BALL_NORMAL, MASK_BALL_OVER_POCKET,
 } from './physics.js';
 import { createPhysicsPolyline, createCylindricalCup } from './geometry.physics.js';
-import { rail_pts, pocket_positions } from './table.js';
+import { rail_pts } from '../shared/table.js';
 import { resetRack, setBallPosition, spotBall, pocketBall } from './balls.logic.js';
-import { createGame } from './game.js';
-import { minPitchForShot, densify } from './clearance.js';
-import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from './net/packets.js';
+import { createGame } from '../shared/game.js';
+import { minPitchForShot, densify } from '../shared/clearance.js';
+import { cross, lenSq, normalize } from '../shared/vec3.js';
+import {
+  pocketPositions, POCKET_Y_THRESHOLD, isInsideAnyPocket, isOverPocketMouth,
+} from '../shared/pockets.js';
+import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packets.js';
 
 // --- Tunables ---------------------------------------------------------------
 export const SHOT_IMPULSE_PER_M = 8.0;   // launch speed (m/s) per metre of pullback; ai.js reads this
@@ -55,9 +59,7 @@ const MAX_SHOT_SECONDS = 60;     // hard cap so a pathological shot can't hang
 const POS_EPS = 1e-4;    // m
 const QUAT_EPS = 1e-3;   // per quaternion component
 
-const POCKET_Y_THRESHOLD = -0.05;
-const POCKET_XZ_RADIUS_SQ = 0.10 * 0.10;
-const POCKET_OPEN_RADIUS_SQ = 0.07 * 0.07;
+// Pocket capture geometry (Y threshold + radii + hit tests) lives in pockets.js.
 const OOB_X = tableW / 2 + 0.15;
 const OOB_Z = tableH / 2 + 0.15;
 
@@ -70,7 +72,6 @@ const SPOT_HALF = tableW / 2 - 2 * R;
 // Interaction state codes come from net/packets.js (shared with the client).
 export { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER };
 
-const pocketPositions = pocket_positions(tableW, tableH);
 const railPointsShared = rail_pts(tableW, tableH);
 const railClearPts = densify(railPointsShared);   // sampled rail for cue-clearance
 
@@ -532,24 +533,3 @@ export class RoomSim {
   }
 }
 
-// --- small vector helpers (plain scalars; no Three on the server) ------------
-function cross(a, b) {
-  return { x: a.y * b.z - a.z * b.y, y: a.z * b.x - a.x * b.z, z: a.x * b.y - a.y * b.x };
-}
-function lenSq(a) { return a.x * a.x + a.y * a.y + a.z * a.z; }
-function normalize(a) { const l = Math.sqrt(lenSq(a)) || 1; return { x: a.x / l, y: a.y / l, z: a.z / l }; }
-
-function isInsideAnyPocket(x, z) {
-  for (const [px, pz] of pocketPositions) {
-    const dx = x - px, dz = z - pz;
-    if (dx * dx + dz * dz <= POCKET_XZ_RADIUS_SQ) return true;
-  }
-  return false;
-}
-function isOverPocketMouth(x, z) {
-  for (const [px, pz] of pocketPositions) {
-    const dx = x - px, dz = z - pz;
-    if (dx * dx + dz * dz <= POCKET_OPEN_RADIUS_SQ) return true;
-  }
-  return false;
-}

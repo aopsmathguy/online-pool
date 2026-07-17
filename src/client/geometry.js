@@ -3,7 +3,7 @@
 // re-exported here so existing client imports keep working. The physics builders
 // moved to geometry.physics.js.
 import * as THREE from "/lib/three.module.js";
-export { rail_pts, felt_pts, pocket_positions } from './table.js';
+export { rail_pts, felt_pts, pocket_positions } from '../shared/table.js';
 
 export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
       const {

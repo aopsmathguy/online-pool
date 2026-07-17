@@ -4,8 +4,8 @@
 // opposite sides of each ball).
 import * as THREE from "/lib/three.module.js";
 import { scene } from './scene.js';
-import { TEX_V_STRETCH, R, RACK_QUAT } from './constants.js';
-import { BALL_COLORS, ballStyle } from './balldefs.js';
+import { TEX_V_STRETCH, R, RACK_QUAT } from '../shared/constants.js';
+import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
 
 function makeBallTexture({ style, color = "#ffffff", number = null }) {
   const size = 256;

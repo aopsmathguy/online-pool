@@ -12,7 +12,7 @@ import { WebSocketServer } from 'ws';
 import { SocketServer } from '../lib/socketUtility.js';
 import {
   packetSchemas, LOBBY_WAITING, LOBBY_READY, gameIdFromByte, gameByteFromId,
-} from '../src/net/packets.js';
+} from '../src/shared/net/packets.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -21,10 +21,10 @@ const PORT = process.env.PORT || 8731;
 // ---- Load Ammo (CommonJS asm.js build) and init physics once ----------------
 const require = createRequire(import.meta.url);
 globalThis.Ammo = require('../lib/ammo.server.cjs');
-const { initPhysics } = await import('../src/physics.js');
+const { initPhysics } = await import('../src/server/physics.js');
 await initPhysics();
-const { RoomSim, PH_PLACING, PH_AIMING } = await import('../src/sim.js');
-const { computeBotShot, computeBotPlacement } = await import('../src/ai.js');
+const { RoomSim, PH_PLACING, PH_AIMING } = await import('../src/server/sim.js');
+const { computeBotShot, computeBotPlacement } = await import('../src/server/ai.js');
 
 // ---- Static file server -----------------------------------------------------
 const MIME = {

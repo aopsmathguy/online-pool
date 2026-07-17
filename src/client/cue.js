@@ -1,7 +1,7 @@
 // src/cue.js
 import * as THREE from "/lib/three.module.js";
 import { scene, camera, setCameraMode } from './scene.js';
-import { R } from './constants.js';
+import { R } from '../shared/constants.js';
 
 // Cue stick dimensions
 const STICK_LEN = 1.45;

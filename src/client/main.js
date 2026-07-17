@@ -3,7 +3,7 @@
 // simulation runs on the server (see server/index.js + src/sim.js).
 import * as THREE from "/lib/three.module.js";
 import { initScene, render, camera } from './scene.js';
-import { tableW, tableH, wireY, rodR, R } from './constants.js';
+import { tableW, tableH, wireY, rodR, R } from '../shared/constants.js';
 import {
   rail_pts, felt_pts, pocket_positions,
   makePolylineMesh, makePlanarMeshFromPolyline, makeCylindricalCupMesh,
@@ -19,13 +19,13 @@ import {
   buildRack, applyBallsFrame, applyBallsFrameLerp, removeBallView, setCuePosition,
   getCueMeshPosition, getObstaclePositions, clearRack,
 } from './balls.view.js';
-import { minPitchForShot, densify } from './clearance.js';
+import { minPitchForShot, densify } from '../shared/clearance.js';
 import { renderHUD, renderPocketed } from './hud.js';
-import { SocketClient } from '../lib/socketUtility.js';
+import { SocketClient } from '../../lib/socketUtility.js';
 import {
   packetSchemas, PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER,
   LOBBY_WAITING, gameByteFromId,
-} from './net/packets.js';
+} from '../shared/net/packets.js';
 
 // ---- Networking -------------------------------------------------------------
 const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

@@ -6,7 +6,7 @@
 // / stepAndDamp, so nothing here is a per-game singleton. tmpTransform / tmpVec3
 // are shared scratch, which is safe because the server steps one world fully
 // before touching another (single-threaded, no re-entrancy).
-import { g, e_rail, mu_wall, FIXED_DT, mu_felt_linear, spin_decel_rad_s2 } from './constants.js';
+import { g, e_rail, mu_wall, FIXED_DT, mu_felt_linear, spin_decel_rad_s2 } from '../shared/constants.js';
 
 // Collision filter groups (bit flags). The felt has its own group so we can
 // selectively disable ball↔felt contact on a per-ball basis when the ball is

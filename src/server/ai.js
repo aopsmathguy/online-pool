@@ -39,12 +39,13 @@
 // This module is server-only (driven from server/index.js) but lives in src/
 // beside the rest of the headless game logic. It reads a live RoomSim.
 import {
-  tableW, tableH, R, g, mu_felt_linear, rodR, wireY, corner_mouth, mid_mouth,
-} from './constants.js';
-import { rail_pts } from './table.js';
-import { groupOf } from './rules/eightball.js';
+  tableW, tableH, R, g, mu_felt_linear, rodR, wireY,
+} from '../shared/constants.js';
+import { rail_pts } from '../shared/table.js';
+import { groupOf } from '../shared/rules/eightball.js';
 import { SHOT_IMPULSE_PER_M } from './sim.js';
-import { minPitchForShot, densify } from './clearance.js';
+import { minPitchForShot, densify } from '../shared/clearance.js';
+import { POCKET_MOUTHS as POCKETS } from '../shared/pockets.js';
 
 // --- Tunables -----------------------------------------------------------------
 // Aim error (the only thing the difficulty slider controls): triangular ± this
@@ -65,30 +66,10 @@ const A_FELT = mu_felt_linear * g;  // felt deceleration applied by stepAndDamp
 // uses to enforce the elevation floor in applyShoot).
 const RAIL_CLEAR_PTS = densify(rail_pts(tableW, tableH));
 
-// Pockets, each described by the two rail-polyline points that define its
-// opening (mouth) — `e1`, `e2` — plus the mouth midpoint `x,z` (used by the
-// scratch/kick keep-out checks, NOT as the aim point) and an approach-angle
-// gate. Corner mouths span [±w/2 ∓ cm/√2, ±h/2] to [±w/2, ±h/2 ∓ cm/√2]; side
-// mouths span [∓mm/2, ±h/2] to [±mm/2, ±h/2]. The actual aim point per shot is
-// computed from the mouth endpoints and the object-ball position (pocketAim).
-// The gate: side pockets refuse shallow (along-rail) approaches that would just
-// clip the mouth; corners accept nearly anything.
-const POCKETS = (() => {
-  const cw = corner_mouth / Math.SQRT2;   // corner mouth endpoint inset per axis
-  const corner = (sx, sz) => ({
-    x: sx * (tableW / 2 - cw / 2), z: sz * (tableH / 2 - cw / 2),
-    e1: { x: sx * (tableW / 2),      z: sz * (tableH / 2 - cw) },
-    e2: { x: sx * (tableW / 2 - cw), z: sz * (tableH / 2) },
-    nx: sx / Math.SQRT2, nz: sz / Math.SQRT2, minDot: 0.05,
-  });
-  const side = (sz) => ({
-    x: 0, z: sz * (tableH / 2),
-    e1: { x: -mid_mouth / 2, z: sz * (tableH / 2) },
-    e2: { x:  mid_mouth / 2, z: sz * (tableH / 2) },
-    nx: 0, nz: sz, minDot: 0.35,
-  });
-  return [corner(-1, -1), side(-1), corner(1, -1), corner(1, 1), side(1), corner(-1, 1)];
-})();
+// Pocket mouth geometry (endpoints `e1`/`e2`, inward normal, approach-angle
+// gate `minDot`) comes from pockets.js as POCKET_MOUTHS → imported as POCKETS.
+// The per-shot aim point is computed from the mouth endpoints and the object
+// ball (pocketAim); the mouth midpoint feeds the scratch/kick keep-out checks.
 
 // --- Small helpers --------------------------------------------------------------
 function jitter(rad) { return (Math.random() + Math.random() - 1) * rad; }   // triangular

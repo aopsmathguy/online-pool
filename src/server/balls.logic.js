@@ -2,12 +2,12 @@
 // Everything is parameterized by (world, balls) so the server can run many
 // tables at once. A "ball" here is { body, number, style, color, overPocket }.
 // The client mirrors these as meshes in balls.view.js keyed by the same id/index.
-import { R, m, mu_ball, e_ball, RACK_QUAT } from './constants.js';
+import { R, m, mu_ball, e_ball, RACK_QUAT } from '../shared/constants.js';
 import {
   AmmoLib, tmpTransform, tmpVec3, createRigidBody, setBodyFilter,
   CG_BALL, MASK_BALL_NORMAL,
 } from './physics.js';
-import { BALL_COLORS, ballStyle } from './balldefs.js';
+import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
 
 // Build physics bodies for a rack described by `layout` (array of ball specs
 // { x, z, number, style?, color?, jitter? }). The first entry is the cue ball

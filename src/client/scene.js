@@ -1,6 +1,6 @@
 // src/scene.js
 import * as THREE from "/lib/three.module.js";
-import { tableW } from './constants.js';
+import { tableW } from '../shared/constants.js';
 
 let renderer, scene, camera, perspCamera, orthoCamera;
 let DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));

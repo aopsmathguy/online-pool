@@ -1,11 +1,11 @@
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 globalThis.Ammo = require('/Users/min/MIT/pool/lib/ammo.server.cjs');
-const { initPhysics } = await import('/Users/min/MIT/pool/src/physics.js');
+const { initPhysics } = await import('/Users/min/MIT/pool/src/server/physics.js');
 await initPhysics();
-const { RoomSim, PH_AIMING } = await import('/Users/min/MIT/pool/src/sim.js');
-const { computeBotShot } = await import('/Users/min/MIT/pool/src/ai.js');
-const { setBallPosition } = await import('/Users/min/MIT/pool/src/balls.logic.js');
+const { RoomSim, PH_AIMING } = await import('/Users/min/MIT/pool/src/server/sim.js');
+const { computeBotShot } = await import('/Users/min/MIT/pool/src/server/ai.js');
+const { setBallPosition } = await import('/Users/min/MIT/pool/src/server/balls.logic.js');
 
 const P = { x: 1.135, z: -0.575 };
 const ux = 0.655 / 0.7962, uz = -0.4525 / 0.7962;

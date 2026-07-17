@@ -2,7 +2,7 @@
 // Ammo only, no Three. Each builder takes the target `world` so a room can
 // build its own table. Ported verbatim from the physics halves of the old
 // geometry.js (the mesh halves stay in geometry.js for the client).
-import { mu_wall, e_rail } from './constants.js';
+import { mu_wall, e_rail } from '../shared/constants.js';
 import { AmmoLib, createRigidBody } from './physics.js';
 
 export function createPhysicsPolyline(world, pointsXZ, wireR, wireY, opts = {}) {
