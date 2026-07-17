@@ -114,7 +114,10 @@ export function bindInput(canvas, handlers) {
 
   document.addEventListener('mousedown', e => {
     if (e.button !== 0) return;
-    if (isPlacing()) { onPlaceConfirm(); return; } // click to drop the cue ball (no lock needed)
+    // Ball-in-hand: click to drop the cue ball — but NOT in free view, which is
+    // look-only. There a click just locks the pointer for mouselook (see the
+    // click handler above); it must not also confirm the placement.
+    if (isPlacing() && getViewMode() !== 'free') { onPlaceConfirm(); return; }
     if (!pointerLocked || !isReady()) return;      // charging needs the locked aim view
     charging = true;
   });

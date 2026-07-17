@@ -30,10 +30,12 @@ export function initScene() {
 
   camera = perspCamera;
 
-  scene.add(new THREE.AmbientLight(0xffffff, 0.1));
-  addDir(0, 3, 2, 2);
-  addDir(-1, 2.5, -2, 1);
-  addDir(4, 2.5, 3, 1);
+  // Soft sky/ground fill instead of flat ambient, one dominant key light that
+  // casts shadows, and a single gentle fill — a conventional 3-light rig at
+  // Three's physically-based default intensities (r155+).
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x223344, 0.5));  // sky / ground fill
+  addDir(0, 3, 2, 2.0);      // key light (casts shadows)
+  addDir(-1, 2.5, -2, 0.4);  // gentle fill
 
   window.addEventListener('resize', fitCanvas);
   fitCanvas();

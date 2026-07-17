@@ -3,10 +3,10 @@
 // Matched to real (Aramith-style) ball colours: chrome yellow, royal blue,
 // deep red, dark purple, burnt orange, forest green, maroon, near-black.
 export const BALL_COLORS = {
-  1:"#EADC5D", 2:"#3879AB", 3:"#DB4841", 4:"#8985AB", 5:"#E78C48",
-  6:"#4B8558", 7:"#A74343", 8:"#201E1F",
-  9:"#EADC5D",10:"#3879AB",11:"#DB4841",12:"#8985AB",13:"#E78C48",
-  14:"#4B8558",15:"#A74343"
+  1:"#ecec00",  2:"#0030E3",  3:"#FF0000",  4:"#4700FF",  5:"#FF8000",
+  6:"#009010",  7:"#600000",  8:"#000000",
+  9:"#ecec00", 10:"#0030E3", 11:"#FF0000", 12:"#4700FF", 13:"#FF8000",
+ 14:"#009010", 15:"#600000"
 };
 
 export const ballStyle = n => (n == null ? "cue" : n <= 8 ? "solid" : "stripe");
