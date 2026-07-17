@@ -62,6 +62,11 @@ function names(room) { return room.conns.map(c => ({ name: c.name || 'Player' })
 function broadcast(room, event, data) { for (const c of room.conns) c.socket.emit(event, data); }
 function opponentOf(conn) { const r = conn.room; return r && r.conns[1 - conn.index]; }
 
+// Bot difficulty is 0-100 on the wire, 0..1 in the sim. Both the initial
+// (playBot) and live (botSkill) paths run values through THIS one clamp, so the
+// difficulty the server uses is always exactly the slider value the client sent.
+const toSkill = (v) => Math.max(0, Math.min(100, v | 0)) / 100;
+
 function createRoom(conn, rulesetId, isPublic = false) {
   // isPublic rooms are the quick-play pool; private (code-shared) rooms are not
   // eligible for quick-play matching.
@@ -163,13 +168,15 @@ socketServer.on('connection', (socket) => {
     else createRoom(conn, wantId, true);
   });
 
-  socket.on('playBot', ({ name, game }) => {
+  socket.on('playBot', ({ name, game, skill }) => {
     if (conn.room) return;
     conn.name = name || 'Player';
     // Private single-player room: the human is player 0, the bot fills seat 1.
+    // Seed the bot's difficulty from the client's slider (no server-side default
+    // to drift out of sync with the UI).
     const room = {
       code: makeCode(), rulesetId: gameIdFromByte(game), conns: [conn],
-      sim: null, public: false, bot: { plan: null, skill: 0.5 },
+      sim: null, public: false, bot: { plan: null, skill: toSkill(skill) },
     };
     rooms.set(room.code, room);
     conn.room = room; conn.index = 0;
@@ -182,7 +189,7 @@ socketServer.on('connection', (socket) => {
   socket.on('botSkill', ({ value }) => {
     const room = conn.room;
     if (!room || !room.bot) return;
-    room.bot.skill = Math.max(0, Math.min(100, value)) / 100;
+    room.bot.skill = toSkill(value);
   });
 
   socket.on('newGame', ({ game }) => {

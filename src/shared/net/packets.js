@@ -9,7 +9,7 @@ export const packetSchemas = {
   createRoom:   { name: 'string', game: 'uint8' },
   joinRoom:     { name: 'string', code: 'string' },
   quickPlay:    { name: 'string', game: 'uint8' },
-  playBot:      { name: 'string', game: 'uint8' },   // single-player vs the computer
+  playBot:      { name: 'string', game: 'uint8', skill: 'uint8' },   // single-player vs the computer (skill 0-100)
   botSkill:     { value: 'uint8' },                  // bot difficulty 0-100 (live-adjustable)
   leaveRoom:    {},
   newGame:      { game: 'uint8' },                 // 255 = keep current ruleset

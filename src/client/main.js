@@ -134,7 +134,7 @@ function gameVal() { return parseInt($('gameSelect').value, 10) || 0; }
 
 $('btnCreate').addEventListener('click', () => socket.emit('createRoom', { name: nameVal(), game: gameVal() }));
 $('btnQuick').addEventListener('click',  () => socket.emit('quickPlay',  { name: nameVal(), game: gameVal() }));
-$('btnBot').addEventListener('click',    () => { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal() }); });
+$('btnBot').addEventListener('click',    () => { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal(), skill: botSkillVal() }); });
 
 // ---- Bot difficulty slider ----------------------------------------------------
 // Lives next to the Computer's name: renderHUD rebuilds the player chips on
@@ -401,7 +401,7 @@ socket.on('connect', () => {
   if (j) socket.emit('joinRoom', { name: nameVal(), code: j.toUpperCase() });
   else if (params.has('create')) socket.emit('createRoom', { name: nameVal(), game: gameVal() });
   else if (params.has('quick')) socket.emit('quickPlay', { name: nameVal(), game: gameVal() });
-  else if (params.has('bot')) { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal() }); }
+  else if (params.has('bot')) { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal(), skill: botSkillVal() }); }
 });
 
 showMenu();
