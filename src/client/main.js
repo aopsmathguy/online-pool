@@ -18,14 +18,14 @@ import {
 import { bindInput } from './input.js';
 import {
   buildRack, applyBallsFrame, applyBallsFrameLerp, removeBallView, setCuePosition,
-  getCueMeshPosition, getObstaclePositions, clearRack, ballIds,
+  getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
 } from './balls.view.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
   initReview, recordShot, resetReview, setReviewLayout, isReviewing, reviewTick,
-  reviewCueAnchor, openReviewPanel,
+  reviewCueAnchor, openReviewPanel, reviewPocketedBaseline,
 } from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
 import {
@@ -109,12 +109,7 @@ function buildScene() {
   input = bindInput(canvas, {
     isReady:  () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_AIMING && myTurn(),
     isPlacing: () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
-    onToggleView: () => {                               // V: cycle aim → free → top
-      camPref = camPref === 'aim' ? 'free' : camPref === 'free' ? 'top' : 'aim';
-      // Snapshot the current view when entering free so it doesn't jump (read
-      // the live camera BEFORE the loop swaps to the perspective one).
-      if (camPref === 'free') initFreeCamFromCurrent();
-    },
+    onToggleView: cycleView,                            // V: cycle aim → free → top
     onZoom: (deltaY) => zoomCamera(deltaY),            // scroll: dolly the camera
     onPlaceMove: (clientX, clientY) => {
       if (!(gs.interact === PH_PLACING && myTurn())) return;
@@ -149,20 +144,19 @@ $('btnQuick').addEventListener('click',  () => socket.emit('quickPlay',  { name:
 $('btnBot').addEventListener('click',    () => { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal(), skill: botSkillVal() }); });
 
 // ---- Bot difficulty slider ----------------------------------------------------
-// Lives next to the Computer's name: renderHUD rebuilds the player chips on
-// every gameState, so after each render we re-parent the (persistent) slider
-// element into the bot's chip. Value 0-100, higher = more accurate bot.
+// Lives in the hamburger menu; shown only in bot games. Value 0-100, higher =
+// more accurate bot.
 const botSkillWrap = $('botSkillWrap');
 const botSkillVal = () => Math.max(0, Math.min(100, parseInt($('botSkillSlider').value, 10) || 0));
 $('botSkillSlider').addEventListener('input', () => socket.emit('botSkill', { value: botSkillVal() }));
-function placeBotSlider() {
-  if (!net.bot) { botSkillWrap.classList.add('hidden'); return; }
-  const chips = $('turnInfo').children;
-  if (chips.length >= 2) {          // chip[1] is always the Computer
-    chips[1].appendChild(botSkillWrap);
-    botSkillWrap.classList.remove('hidden');
-  }
-}
+function placeBotSlider() { botSkillWrap.classList.toggle('hidden', !net.bot); }
+
+// ---- Hamburger menu + instructions expanders ----------------------------------
+$('menuBtn').addEventListener('click', () => $('sideMenu').classList.toggle('collapsed'));
+$('helpToggle').addEventListener('click', () => {
+  const collapsed = $('helpPanel').classList.toggle('collapsed');
+  $('helpToggle').textContent = collapsed ? 'Instructions ▸' : 'Instructions ▾';
+});
 $('btnJoin').addEventListener('click',   () => {
   const code = ($('codeInput').value || '').toUpperCase().trim();
   if (code.length) socket.emit('joinRoom', { name: nameVal(), code });
@@ -288,7 +282,7 @@ socket.on('gameState', afterReplay((state) => {
   gs = state;
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
   placeBotSlider();               // re-attach the difficulty slider to the bot chip
-  if (gs.winner >= 0) openReviewPanel();   // game over → surface the replay controls
+  if (gs.winner >= 0) { $('sideMenu').classList.remove('collapsed'); openReviewPanel(); }   // game over → surface the replay controls
 
   const turnKey = `${gs.interact}:${gs.current}`;
   // Reset my spin/charge/view at the start of my aiming turn.
@@ -338,6 +332,36 @@ function maybeSendAim(now) {
   socket.emit('aim', { yaw: getYaw(), pitch: getPitch(), strikeX: s.x, strikeY: s.y, pullback: getPullback() });
 }
 
+// ---- Camera view cycling + on-screen controls -------------------------------
+// V key and the on-screen view button both cycle aim → free → overhead.
+function cycleView() {
+  camPref = camPref === 'aim' ? 'free' : camPref === 'free' ? 'top' : 'aim';
+  if (camPref === 'free') initFreeCamFromCurrent();
+}
+$('viewBtn').addEventListener('click', cycleView);
+
+const VIEW_ICONS = { aim: '🎯', free: '🎥', top: '⬇️' };
+const VIEW_NAMES = { aim: 'Aim (down cue)', free: 'Free fly-around', top: 'Overhead' };
+// Reflect the current view in the button icon and show the matching bottom-right
+// controls: zoom in aim/overhead, the movement pad in free-fly.
+function updateViewUi(view) {
+  const vb = $('viewBtn');
+  vb.textContent = VIEW_ICONS[view] || '🎯';
+  vb.title = `View: ${VIEW_NAMES[view] || view} — tap to change`;
+  $('zoomControls').classList.toggle('hidden', !(view === 'aim' || view === 'top'));
+  $('freeControls').classList.toggle('hidden', view !== 'free');
+}
+function hideInGameControls() {
+  $('zoomControls').classList.add('hidden');
+  $('freeControls').classList.add('hidden');
+}
+// Pocketed numbers to display now: the confirmed baseline plus any ball that has
+// visibly dropped into a pocket this instant (so the column updates the moment a
+// ball sinks, live or in a replay — before the shot fully resolves).
+function pocketedNow(baseline) {
+  return [...new Set([...(baseline || []), ...sunkNumbers()])];
+}
+
 // ---- Render loop ------------------------------------------------------------
 function loop(now) {
   requestAnimationFrame(loop);
@@ -364,7 +388,14 @@ function loop(now) {
       if (cuePos && isCueVisible()) updateCueStick(cuePos);      // stick only
       placeCamera();
     }
-    clearHud();
+    // HUD during review: the pocketed column updates as balls drop in the replay
+    // (baseline = pocketed as of this shot's start), plus the shot's spin/power.
+    const s = getStrikeOffset();
+    drawHud({
+      strikeX: s.x, strikeY: s.y, power: getPullback() / getMaxPullback(),
+      view, pocketed: pocketedNow(reviewPocketedBaseline()),
+    });
+    updateViewUi(view);
     $('banner').classList.remove('show');   // don't let the win banner cover the replay
     render();
     wasReviewing = true;
@@ -420,10 +451,12 @@ function loop(now) {
       strikeX: s.x, strikeY: s.y,
       power: getPullback() / getMaxPullback(),
       view,
-      pocketed: gs.pocketed || [],
+      pocketed: pocketedNow(gs.pocketed),
     });
+    updateViewUi(view);
   } else {
     clearHud();
+    hideInGameControls();
   }
 
   render();
@@ -434,6 +467,7 @@ window.__errors = [];
 window.addEventListener('error', e => window.__errors.push(String(e.message || e.error)));
 window.__net = { socket, state: () => gs, me: () => net };
 window.__ballIds = ballIds;   // debug: client-side rendered ball set (ghost detection)
+window.__sunk = sunkNumbers;  // debug: balls currently dropped into a pocket
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');

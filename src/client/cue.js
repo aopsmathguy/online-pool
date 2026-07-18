@@ -7,6 +7,8 @@ import { R } from '../shared/constants.js';
 const STICK_LEN = 1.45;
 const TIP_R = 0.007;
 const BUTT_R = 0.014;
+// Real cue proportions, exported so the HUD power-bar stick can match them.
+export const CUE_DIMS = { len: STICK_LEN, tipR: TIP_R, buttR: BUTT_R };
 const GAP = 0.012;          // distance between cue tip and ball when at rest
 const PULLBACK_MAX = 0.825;  // maximum draw-back distance (drives shot power); ai.js MAX_POWER must match
 const VISUAL_PULLBACK_SCALE = 0.35; // visual stick draw is this fraction of pullback
@@ -59,6 +61,16 @@ export function zoomCamera(deltaY) {
   } else {
     // scroll up → forward along the stick, toward the ball (closer)
     camDistTarget = clamp(camDistTarget + dir * CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX);
+  }
+}
+
+// One notch of zoom for the on-screen +/- buttons, consistent across views:
+// inDir = +1 zooms IN (closer in aim, tighter overhead), -1 zooms OUT.
+export function zoomStep(inDir) {
+  if (viewMode === 'top') {
+    topHeightTarget = clamp(topHeightTarget - inDir * TOP_H_STEP, TOP_H_MIN, TOP_H_MAX);
+  } else if (viewMode !== 'free') {
+    camDistTarget = clamp(camDistTarget - inDir * CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX);
   }
 }
 // The overhead view renders through the orthographic camera (true plan view);

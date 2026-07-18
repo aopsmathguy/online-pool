@@ -1,33 +1,21 @@
-// src/input.js
-// First-person mouse controls:
-//   - Move mouse left/right: rotate aim around the cue ball (yaw)
-//   - Move mouse up/down: raise/lower camera pitch (also tilts the cue stick)
-//   - HOLD ALT + move mouse: adjust the cue-tip strike point on the cue ball
-//     (instead of yaw/pitch) — left/right = english, up/down = top/back spin
-//   - Hold left mouse button: pull cue stick back (charge shot)
-//   - Release left mouse button: shoot (impulse proportional to pullback)
-//   - X: reset strike point to center
-//   - V: cycle camera — down-the-stick aim → free fly-around → overhead
-//   - Click on canvas to lock the pointer; ESC to unlock.
-//
-// Free fly-around view: WASD walk and Space/Shift go up/down whether or not the
-// pointer is locked, but MOUSE-LOOK only turns the view while the pointer is
-// locked (cursor hidden). Click the canvas to lock; ESC to release.
-//
-// Ball-in-hand: when handlers.isPlacing() is true, the cursor (visible in the
-// overhead view) points at the table — onPlaceMove receives the absolute cursor
-// position and a left click confirms the placement (onPlaceConfirm).
-//
-// The pointer is locked (cursor hidden, for mouselook) in the aim/free views;
-// the overhead view keeps the OS cursor visible.
-import { addYaw, addPitch, addStrikeOffset, resetStrikeOffset,
+// src/input.js — pointer-based controls (mouse + touch), no pointer lock.
+//   - Aim view: DRAG on the table to rotate aim (yaw) + camera pitch.
+//   - Spin: tap / drag the spin dial (bottom-left cue-ball face); X recenters.
+//   - Free view: DRAG to look; the on-screen pad (or WASD/Space/Shift) moves.
+//   - Shoot: grab the cue stick over the left-middle power bar, DRAG it DOWN to
+//       build power (the tip marks how much), release to fire; ESC cancels.
+//   - Zoom: the on-screen +/- buttons (aim + overhead) or the mouse wheel.
+//   - V cycles the camera; the on-screen view button does the same.
+//   - Ball-in-hand: drag to position the cue ball, release to place it.
+import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
-         getViewMode, freeLookMouse, freeMove } from './cue.js';
+         getViewMode, freeLookMouse, freeMove, zoomStep } from './cue.js';
+import { powerBarRect, spinDialRect } from './hudCanvas.js';
 
-const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal mouse motion (yaw)
-const MOUSE_SENS_Y = 0.0020;     // radians per pixel of vertical mouse motion (pitch)
-const STRIKE_SENS = 0.005;       // strike-offset units per pixel while Alt is held
-const CHARGE_RATE = 0.825;       // pullback meters per second while holding (1 s to full charge)
+const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
+const MOUSE_SENS_Y = 0.0020;     // radians per pixel of vertical drag (pitch)
+const POWER_PAD = 20;            // px slop around the power bar for grabbing the stick
+const SPIN_PAD = 8;              // px slop around the spin dial
 
 export function bindInput(canvas, handlers) {
   const {
@@ -40,12 +28,11 @@ export function bindInput(canvas, handlers) {
     onZoom = () => {},
   } = handlers;
 
-  let pointerLocked = false;
-  let charging = false;
-  let altHeld = false;
+  let drag = null;      // null | 'aim' | 'spin' | 'look' | 'power' | 'place'
+  let dragId = null;    // pointerId of the active drag
+  let lastX = 0, lastY = 0;
   let lastTime = performance.now();
-  // Held movement keys for the free-fly ("look around") camera: WASD walk,
-  // Space up, Shift down. Map an event to its axis key (or null).
+  // Held movement keys / buttons for the free-fly camera.
   const moveKeys = { w: false, a: false, s: false, d: false, up: false, down: false };
   const moveKeyFor = (e) => {
     if (e.code === 'Space' || e.key === ' ') return 'up';
@@ -54,19 +41,35 @@ export function bindInput(canvas, handlers) {
     return (k === 'w' || k === 'a' || k === 's' || k === 'd') ? k : null;
   };
 
-  // Lock the pointer (hides the cursor for mouselook) in the aim/free views; the
-  // overhead view keeps the OS cursor visible (ball-in-hand placement raycasts
-  // the real cursor). Free-fly ALSO works with the cursor visible: when unlocked,
-  // moving the mouse still turns the view (see mousemove) and WASD/Space/Shift
-  // still fly (see keydown/tick).
-  canvas.addEventListener('click', () => {
-    if (!pointerLocked && getViewMode() !== 'top') canvas.requestPointerLock();
-  });
+  // Canvas-local CSS-pixel coords (the same space the HUD draws in).
+  function local(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    return { x: clientX - r.left, y: clientY - r.top };
+  }
+  function overPowerBar(p) {
+    const b = powerBarRect();
+    return !!b && p.x >= b.x - POWER_PAD && p.x <= b.x + b.w + POWER_PAD
+              && p.y >= b.yTop - POWER_PAD && p.y <= b.yTop + b.h + POWER_PAD;
+  }
+  function powerFromY(y) {
+    const b = powerBarRect();
+    if (!b) return 0;
+    return Math.max(0, Math.min(1, (y - b.yTop) / b.h));
+  }
+  const setPowerFrom = (y) => setPullback(powerFromY(y) * getMaxPullback());
+  function overSpinDial(p) {
+    const d = spinDialRect();
+    return !!d && Math.hypot(p.x - d.cx, p.y - d.cy) <= d.r + SPIN_PAD;
+  }
+  function setSpinFrom(p) {
+    const d = spinDialRect();
+    if (!d) return;
+    setStrikeOffset((p.x - d.cx) / d.r, -(p.y - d.cy) / d.r);
+  }
+
   canvas.addEventListener('contextmenu', e => e.preventDefault());
 
-  // Scroll wheel → camera dolly. Rate-limited: wheel events fire rapidly, so we
-  // accumulate the delta and flush at most once per ZOOM_THROTTLE ms. The
-  // camera itself eases toward the target (in cue.js) so motion stays smooth.
+  // Mouse-wheel zoom (desktop). Rate-limited; the camera eases in cue.js.
   const ZOOM_THROTTLE = 40;
   let zoomAccum = 0, lastZoom = 0;
   canvas.addEventListener('wheel', e => {
@@ -74,110 +77,105 @@ export function bindInput(canvas, handlers) {
     zoomAccum += e.deltaY;
     const now = performance.now();
     if (now - lastZoom >= ZOOM_THROTTLE && zoomAccum !== 0) {
-      onZoom(zoomAccum);
-      zoomAccum = 0;
-      lastZoom = now;
+      onZoom(zoomAccum); zoomAccum = 0; lastZoom = now;
     }
   }, { passive: false });
 
-  document.addEventListener('pointerlockchange', () => {
-    pointerLocked = (document.pointerLockElement === canvas);
-    if (!pointerLocked) {
-      // Cancel any in-progress charge if pointer unlocks
-      charging = false;
+  canvas.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (drag) return;   // already dragging — ignore extra touches
+    const p = local(e.clientX, e.clientY);
+    lastX = e.clientX; lastY = e.clientY;
+    let mode = null;
+    if (isReady() && overPowerBar(p)) { mode = 'power'; setPowerFrom(p.y); }
+    else if (isReady() && overSpinDial(p)) { mode = 'spin'; setSpinFrom(p); }
+    else if (isPlacing()) { mode = 'place'; onPlaceMove(e.clientX, e.clientY); }
+    else if (getViewMode() === 'free') mode = 'look';
+    else if (getViewMode() === 'aim') mode = 'aim';
+    if (!mode) return;
+    drag = mode; dragId = e.pointerId;
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    e.preventDefault();
+  });
+
+  // Deltas from the previous position (works for touch, unlike movementX/Y).
+  window.addEventListener('pointermove', e => {
+    if (drag && e.pointerId === dragId) {
+      const p = local(e.clientX, e.clientY);
+      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      if (drag === 'power') return setPowerFrom(p.y);
+      if (drag === 'spin')  return setSpinFrom(p);
+      if (drag === 'place') return onPlaceMove(e.clientX, e.clientY);
+      if (drag === 'aim')   { addYaw(dx * MOUSE_SENS_X); addPitch(-dy * MOUSE_SENS_Y); return; }
+      if (drag === 'look')  { freeLookMouse(dx, dy); return; }
+      return;
+    }
+    // Mouse hover positions the cue ball while placing (no touch hover).
+    if (!drag && isPlacing() && e.pointerType === 'mouse') onPlaceMove(e.clientX, e.clientY);
+  });
+
+  function endDrag(e) {
+    if (e && e.pointerId !== dragId) return;
+    const mode = drag;
+    drag = null; dragId = null;
+    if (mode === 'power') {
+      const pull = getPullback();
       setPullback(0);
+      if (pull > 0.001) onShoot(pull);
+    } else if (mode === 'place') {
+      onPlaceConfirm();
     }
-  });
+  }
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
 
-  document.addEventListener('mousemove', e => {
-    if (getViewMode() === 'free') {
-      // Free-fly spectator camera: mouse turns the view — never the aim, and
-      // never the ball-in-hand position (checked before isPlacing on purpose).
-      // Look only works while the pointer is locked (cursor hidden); with the
-      // cursor visible the mouse is free to move without swinging the view.
-      if (pointerLocked) freeLookMouse(e.movementX, e.movementY);
-      return;
-    }
-    if (isPlacing()) {
-      // Ball-in-hand (overhead): the cursor is visible; place the ball where it
-      // points (absolute position, not relative — main.js raycasts it).
-      onPlaceMove(e.clientX, e.clientY);
-      return;
-    }
-    if (!pointerLocked) return;
-    // Aiming only happens while sighting down the stick. In the bird's-eye
-    // (top) view the mouse must NOT change the aim.
-    if (getViewMode() !== 'aim') return;
-    if (altHeld || e.altKey) {
-      // Adjust the cue-tip strike point on the cue ball instead of aiming.
-      // Screen Y is inverted from spin "up": mouse up (movementY < 0) → top spin.
-      addStrikeOffset(e.movementX * STRIKE_SENS, -e.movementY * STRIKE_SENS);
-      return;
-    }
-    addYaw(e.movementX * MOUSE_SENS_X);
-    // Mouse up (movementY < 0) → raise camera (increase pitch),
-    // mouse down → lower camera toward horizontal.
-    addPitch(-e.movementY * MOUSE_SENS_Y);
-  });
-
-  document.addEventListener('mousedown', e => {
-    if (e.button !== 0) return;
-    // Ball-in-hand: click to drop the cue ball — but NOT in free view, which is
-    // look-only. There a click just locks the pointer for mouselook (see the
-    // click handler above); it must not also confirm the placement.
-    if (isPlacing() && getViewMode() !== 'free') { onPlaceConfirm(); return; }
-    if (!pointerLocked || !isReady()) return;      // charging needs the locked aim view
-    charging = true;
-  });
-
-  // Alt held → mouse adjusts the cue-tip strike point. X resets to center.
-  // V toggles the overhead view.
   document.addEventListener('keydown', e => {
-    // While charging (holding to draw the cue back), ANY key aborts the shot:
-    // drop the draw and swallow the key so the release doesn't fire (mouseup
-    // sees charging=false and bails).
-    if (charging) { charging = false; setPullback(0); e.preventDefault(); return; }
-    if (e.key === 'Alt') altHeld = true;
-    if (e.key === 'v' || e.key === 'V') onToggleView();   // cycle aim → free → overhead
-    // Free-fly movement (WASD/Space/Shift) works in free view whether or not the
-    // pointer is locked, so the cursor can stay visible.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+    if (drag === 'power' && e.key === 'Escape') { drag = null; dragId = null; setPullback(0); e.preventDefault(); return; }
+    if (e.key === 'v' || e.key === 'V') onToggleView();
     const k = moveKeyFor(e);
-    if (k && (getViewMode() === 'free' || pointerLocked)) { moveKeys[k] = true; e.preventDefault(); return; }
-    if (!pointerLocked) return;
+    if (k && getViewMode() === 'free') { moveKeys[k] = true; e.preventDefault(); return; }
     if (e.key === 'x' || e.key === 'X') { resetStrikeOffset(); e.preventDefault(); }
   });
   document.addEventListener('keyup', e => {
-    if (e.key === 'Alt') altHeld = false;
     const k = moveKeyFor(e);
     if (k) moveKeys[k] = false;
   });
-  // If we lose focus while Alt/movement keys are down, drop the held state.
-  window.addEventListener('blur', () => {
-    altHeld = false;
-    for (const k in moveKeys) moveKeys[k] = false;
-  });
 
-  document.addEventListener('mouseup', e => {
-    if (e.button !== 0) return;
-    if (!charging) return;
-    charging = false;
-    const pull = getPullback();
-    setPullback(0);
-    if (pull <= 0.001) return;
-    onShoot(pull); // main.js builds the 3D impulse from pull + yaw + pitch + strike
+  // ---- On-screen controls (bottom-right): zoom + free-camera movement ----------
+  let zoomTimer = null;
+  const startZoom = (dir) => { zoomStep(dir); clearInterval(zoomTimer); zoomTimer = setInterval(() => zoomStep(dir), 90); };
+  const stopZoom = () => { clearInterval(zoomTimer); zoomTimer = null; };
+  // A press-and-hold button: captures the pointer so release fires even if the
+  // finger slides off, and works for mouse + touch.
+  const holdBtn = (id, onDown, onUp) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    let active = false;
+    el.addEventListener('pointerdown', e => { e.preventDefault(); active = true; try { el.setPointerCapture(e.pointerId); } catch {} onDown(); });
+    const up = (e) => { if (e) e.preventDefault && e.preventDefault(); if (active) { active = false; onUp(); } };
+    el.addEventListener('pointerup', up);
+    el.addEventListener('pointercancel', up);
+  };
+  holdBtn('zoomIn',  () => startZoom(+1), stopZoom);
+  holdBtn('zoomOut', () => startZoom(-1), stopZoom);
+  const moveBtns = { freeFwd: 'w', freeBack: 's', freeLeft: 'a', freeRight: 'd', freeUp: 'up', freeDown: 'down' };
+  for (const [id, key] of Object.entries(moveBtns)) holdBtn(id, () => { moveKeys[key] = true; }, () => { moveKeys[key] = false; });
+
+  // Losing focus drops everything held.
+  window.addEventListener('blur', () => {
+    for (const k in moveKeys) moveKeys[k] = false;
+    stopZoom();
+    if (drag === 'power') setPullback(0);
+    drag = null; dragId = null;
   });
 
   function tick() {
     const now = performance.now();
     const dt = (now - lastTime) / 1000;
     lastTime = now;
-    // Overhead view: release the pointer so the OS cursor is visible.
-    if (pointerLocked && getViewMode() === 'top') document.exitPointerLock();
-    if (charging) {
-      setPullback(Math.min(getMaxPullback(), getPullback() + CHARGE_RATE * dt));
-    }
-    // Free-fly movement: WASD walk (relative to look yaw), Space up / Shift down.
-    // Works whether or not the pointer is locked (cursor may be visible).
     if (getViewMode() === 'free') {
       const fwd = (moveKeys.w ? 1 : 0) - (moveKeys.s ? 1 : 0);
       const strafe = (moveKeys.d ? 1 : 0) - (moveKeys.a ? 1 : 0);
@@ -186,9 +184,5 @@ export function bindInput(canvas, handlers) {
     }
   }
 
-  return {
-    tick,
-    isPointerLocked: () => pointerLocked,
-    isCharging: () => charging,
-  };
+  return { tick, isDragging: () => !!drag };
 }

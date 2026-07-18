@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Online Pool — 8-Ball / 9-Ball</title>
   <link rel="stylesheet" href="./styles.css" />
   <!-- schemapack.js does `import { Buffer } from 'buffer'`; map it to our shim. -->
@@ -56,47 +56,89 @@
            drawn over the 3D stage. pointer-events:none so it never eats input. -->
       <canvas id="hudCanvas"></canvas>
       <div id="banner"></div>
-      <!-- Collapsible shot-replay player: pick a past shot, then play/pause/
-           restart and scrub it like a video (see shotReview.js). -->
-      <div id="replayPanel" class="replayPanel collapsed">
-        <button id="replayToggle" class="replayToggle">Replays ▸</button>
-        <div class="replayBody">
-          <select id="replaySelect" class="replaySelect"></select>
-          <div class="replayControls">
-            <button id="replayRestart" title="Restart">⏮</button>
-            <button id="replayStepBack" title="Step back 4 ms">−4</button>
-            <button id="replayPlay" title="Play / Pause">▶</button>
-            <button id="replayStepFwd" title="Step forward 4 ms">+4</button>
-            <button id="replayExit" title="Back to live game">✕</button>
+
+      <!-- Top-left hamburger: game actions + collapsible replays + instructions -->
+      <div id="sideMenu" class="sideMenu collapsed">
+        <button id="menuBtn" class="menuBtn" aria-label="Menu" title="Menu">≡</button>
+        <div class="sideMenuBody">
+          <div class="btnRow">
+            <button id="btnNewGame">New Game</button>
+            <button id="btnLeaveGame">Leave</button>
           </div>
-          <div class="replayTimeRow"><span id="replayTime" class="replayTime">0.0 / 0.0s</span></div>
-          <input id="replayScrub" class="replayScrub" type="range" min="0" max="1000" value="0" />
+
+          <!-- Collapsible shot-replay player: pick a past shot, then play/pause/
+               restart and scrub it like a video (see shotReview.js). -->
+          <div id="replayPanel" class="replayPanel collapsed">
+            <button id="replayToggle" class="replayToggle">Replays ▸</button>
+            <div class="replayBody">
+              <select id="replaySelect" class="replaySelect"></select>
+              <div class="replayControls">
+                <button id="replayRestart" title="Restart">⏮</button>
+                <button id="replayStepBack" title="Step back 4 ms">−4</button>
+                <button id="replayPlay" title="Play / Pause">▶</button>
+                <button id="replayStepFwd" title="Step forward 4 ms">+4</button>
+                <button id="replayExit" title="Back to live game">✕</button>
+              </div>
+              <div class="replayTimeRow"><span id="replayTime" class="replayTime">0.0 / 0.0s</span></div>
+              <input id="replayScrub" class="replayScrub" type="range" min="0" max="1000" value="0" />
+            </div>
+          </div>
+
+          <!-- Collapsible instructions -->
+          <div id="helpPanel" class="helpPanel collapsed">
+            <button id="helpToggle" class="helpToggle">Instructions ▸</button>
+            <div class="helpBody">
+              <p><b>Drag</b> on the table to aim (rotate + tilt the view). Click or drag on
+              the <b>spin dial</b> (bottom-left cue-ball face) to set spin (<b>X</b>
+              recenters). To shoot, grab the cue stick over the <b>power bar</b> on the left
+              and drag it <b>down</b> — the tip shows how much power — then release. <b>V</b>
+              cycles the camera: down-the-stick aim → free fly-around (drag to look,
+              <b>WASD</b> move, <b>Space</b>/<b>Shift</b> up/down) → overhead.</p>
+              <p>After a foul the other player gets <b>ball in hand</b> (overhead view — move
+              the mouse to position the cue ball, then click to place it).</p>
+            </div>
+          </div>
+
+          <!-- Bot games only: opponent difficulty -->
+          <div id="botSkillWrap" class="hidden">
+            <span>Difficulty</span>
+            <input id="botSkillSlider" type="range" min="0" max="100" value="50" />
+          </div>
+        </div>
+      </div>
+
+      <!-- Top-middle: player names (current turn is bold + underlined) + status -->
+      <div id="players" class="players"></div>
+      <div class="statusMid">
+        <div id="groupInfo"></div>
+        <div id="gameMsg"></div>
+      </div>
+
+      <!-- Bottom-left: tap to cycle the camera (aim → free → overhead); the icon
+           shows the current view. Mirrors the V key. -->
+      <button id="viewBtn" class="viewBtn" title="Change view">🎯</button>
+
+      <!-- Bottom-right touch controls. Zoom shows in aim / overhead; the movement
+           pad shows in free-fly. main.js toggles them by view. -->
+      <div id="zoomControls" class="ctrlCluster hidden">
+        <button id="zoomIn" class="ctrlBtn" aria-label="Zoom in">＋</button>
+        <button id="zoomOut" class="ctrlBtn" aria-label="Zoom out">－</button>
+      </div>
+      <div id="freeControls" class="ctrlCluster hidden">
+        <div class="dpad">
+          <button id="freeFwd" class="ctrlBtn" aria-label="Forward">↑</button>
+          <div class="dpadRow">
+            <button id="freeLeft" class="ctrlBtn" aria-label="Left">←</button>
+            <button id="freeRight" class="ctrlBtn" aria-label="Right">→</button>
+          </div>
+          <button id="freeBack" class="ctrlBtn" aria-label="Back">↓</button>
+        </div>
+        <div class="updown">
+          <button id="freeUp" class="ctrlBtn" aria-label="Up">⤒</button>
+          <button id="freeDown" class="ctrlBtn" aria-label="Down">⤓</button>
         </div>
       </div>
     </div>
-    <aside>
-      <h2>Online Pool</h2>
-      <div id="turnInfo"></div>
-      <!-- Bot games only: main.js moves this inside the Computer's player chip. -->
-      <div id="botSkillWrap" class="hidden">
-        <span>Difficulty</span>
-        <input id="botSkillSlider" type="range" min="0" max="100" value="50" />
-      </div>
-      <div id="groupInfo"></div>
-      <div id="gameMsg"></div>
-      <div class="btnRow">
-        <button id="btnNewGame">New Game</button>
-        <button id="btnLeaveGame">Leave</button>
-      </div>
-      <h3>Controls</h3>
-      <p>Move mouse to aim (only while sighting down the cue), hold left-click to draw
-      the cue back, release to shoot. Hold <b>ALT</b> + move mouse to set spin (<b>X</b>
-      resets). <b>V</b> cycles the camera: down-the-stick aim → free fly-around
-      (mouse looks, <b>WASD</b> move, <b>Space</b>/<b>Shift</b> up/down) → overhead. Click
-      the table to lock the mouse; ESC releases it.</p>
-      <p>After a foul the other player gets <b>ball in hand</b> (overhead view — move
-      the mouse to position the cue ball, then click to place it).</p>
-    </aside>
   </div>
 
   <!-- Ammo global (wasm build) for the client renderer is NOT needed: the client

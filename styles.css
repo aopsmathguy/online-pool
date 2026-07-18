@@ -1,8 +1,8 @@
 /* styles.css */
 html, body { margin:0; height:100%; overflow:hidden; background:#0b1020; color:#e7eef7; font-family:sans-serif; }
-.wrap { display:grid; grid-template-columns:minmax(0,1fr) 320px; height:100%; }
-.stageWrap { position:relative; overflow:hidden; }
-#stage { width:100%; height:100%; display:block; background:#073b18; cursor:crosshair; }
+.wrap { height:100%; }
+.stageWrap { position:relative; overflow:hidden; height:100%; }
+#stage { width:100%; height:100%; display:block; background:#073b18; cursor:crosshair; touch-action:none; }
 aside { background:#0e1328; padding:12px; overflow:auto; border-left:1px solid #1c2340; }
 aside h2 { margin:0 0 8px; font-size:18px; }
 button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6px 10px; border-radius:6px; cursor:pointer; }
@@ -32,26 +32,53 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 .menuMsg { min-height:18px; margin-top:12px; color:#ff8a8a; font-size:13px; }
 .bigCode { font-size:44px; font-weight:700; letter-spacing:8px; color:#7ea2ff; margin:10px 0 22px; }
 
-/* Rules HUD */
-#turnInfo { display:flex; flex-direction:column; gap:6px; margin-bottom:8px; }
-.playerChip { padding:6px 10px; border-radius:6px; border:1px solid #2a3566; background:#0c1230; font-size:14px; opacity:0.65; }
-.playerChip.active { opacity:1; border-color:#4f7cff; background:#16204a; box-shadow:0 0 0 1px #4f7cff inset; font-weight:600; }
-#botSkillWrap { display:flex; align-items:center; gap:8px; margin-top:6px;
+/* In-game bot-difficulty slider (lives inside the hamburger menu). */
+#botSkillWrap { display:flex; align-items:center; gap:8px;
   font-size:11px; color:#9fb0d8; font-weight:400; }
 #botSkillWrap input { flex:1; margin:0; accent-color:#4f7cff; }
-#groupInfo { font-size:13px; color:#9fb0d8; margin-bottom:6px; }
-#gameMsg { font-size:14px; min-height:20px; padding:6px 8px; border-radius:6px; background:#0c1230; border:1px solid #1c2340; }
-#gameMsg.foul { color:#ffd27d; border-color:#7a5a1f; background:#241b0c; }
-aside h3 { margin:14px 0 4px; font-size:14px; color:#9fb0d8; }
-aside p { font-size:13px; color:#9fb0d8; line-height:1.5; }
 
 /* In-game HUD overlay canvas (spin/power/view/pocketed), drawn over the stage. */
 #hudCanvas { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
 
-/* Shot-replay review player (collapsible, floats over the top-right of the stage) */
-.replayPanel { position:absolute; top:12px; right:12px; width:250px; z-index:5;
-  background:rgba(14,19,40,0.92); border:1px solid #223056; border-radius:10px;
-  box-shadow:0 10px 30px rgba(0,0,0,0.45); font-size:13px; overflow:hidden; }
+/* ===== Top-left hamburger menu ===== */
+.sideMenu { position:absolute; top:12px; left:12px; z-index:6; width:238px; }
+.menuBtn { width:42px; height:38px; font-size:22px; line-height:1; padding:0;
+  background:#16204a; border:1px solid #223056; border-radius:8px; cursor:pointer; }
+.menuBtn:hover { background:#1c2a5e; }
+.sideMenuBody { margin-top:8px; background:rgba(14,19,40,0.95); border:1px solid #223056;
+  border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px;
+  box-shadow:0 12px 34px rgba(0,0,0,0.5); }
+.sideMenu.collapsed .sideMenuBody { display:none; }
+.sideMenuBody .btnRow { margin:0; }
+.sideMenuBody .btnRow button { flex:1; }
+
+/* Instructions expander (inside the menu) */
+.helpPanel { background:rgba(16,23,58,0.55); border:1px solid #2a3566; border-radius:8px; overflow:hidden; }
+.helpToggle { width:100%; text-align:left; border:none; border-radius:0;
+  background:#16204a; padding:8px 12px; font-weight:600; }
+.helpToggle:hover { background:#1c2a5e; }
+.helpBody { padding:8px 12px 2px; font-size:12px; color:#9fb0d8; line-height:1.5; }
+.helpBody p { margin:0 0 8px; }
+.helpPanel.collapsed .helpBody { display:none; }
+
+/* ===== Top-middle player names + status ===== */
+.players { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5;
+  display:flex; align-items:center; gap:14px; font-size:17px; color:#e7eef7;
+  background:rgba(14,19,40,0.85); border:1px solid #223056; border-radius:10px;
+  padding:7px 18px; pointer-events:none; white-space:nowrap; }
+.playerName { opacity:0.6; }
+.playerName.active { opacity:1; font-weight:700; text-decoration:underline; }
+.playerSep { opacity:0.45; font-size:13px; }
+.statusMid { position:absolute; top:58px; left:50%; transform:translateX(-50%); z-index:5;
+  text-align:center; max-width:70%; pointer-events:none; }
+#groupInfo { font-size:13px; color:#9fb0d8; }
+#gameMsg { font-size:14px; color:#e7eef7; margin-top:4px; display:inline-block; padding:4px 10px; border-radius:6px; }
+#gameMsg:empty { display:none; }
+#gameMsg.foul { color:#ffd27d; background:rgba(36,27,12,0.9); border:1px solid #7a5a1f; }
+
+/* Shot-replay review player (collapsible, inside the hamburger menu) */
+.replayPanel { background:rgba(16,23,58,0.55); border:1px solid #2a3566; border-radius:8px;
+  font-size:13px; overflow:hidden; }
 .replayToggle { width:100%; text-align:left; border:none; border-radius:0;
   background:#16204a; padding:8px 12px; font-weight:600; }
 .replayToggle:hover { background:#1c2a5e; }
@@ -66,6 +93,26 @@ aside p { font-size:13px; color:#9fb0d8; line-height:1.5; }
 .replayTime { color:#9fb0d8; font-variant-numeric:tabular-nums; }
 .replayScrub { width:100%; margin:0; accent-color:#4f7cff; cursor:pointer; }
 .replayScrub:disabled { opacity:0.4; cursor:default; }
+
+/* ===== In-game touch controls ===== */
+/* Tap-to-cycle camera view (bottom-left, beside the spin dial); icon = current view. */
+.viewBtn { position:absolute; left:120px; bottom:24px; z-index:5;
+  width:54px; height:54px; font-size:26px; line-height:1; padding:0;
+  background:rgba(22,32,74,0.9); border:1px solid #2a3566; border-radius:12px;
+  cursor:pointer; touch-action:none; -webkit-touch-callout:none; user-select:none; }
+.viewBtn:hover { background:#1c2a5e; }
+
+/* Bottom-right clusters: zoom (aim/overhead) or free-cam movement pad. */
+.ctrlCluster { position:absolute; right:16px; bottom:20px; z-index:6;
+  display:flex; flex-direction:column; align-items:center; gap:10px; touch-action:none; }
+#freeControls { flex-direction:row; align-items:flex-end; gap:14px; }
+.dpad { display:flex; flex-direction:column; align-items:center; gap:6px; }
+.dpadRow { display:flex; gap:6px; }
+.updown { display:flex; flex-direction:column; gap:6px; }
+.ctrlBtn { width:56px; height:56px; font-size:24px; line-height:1; padding:0; margin:0;
+  background:rgba(22,32,74,0.9); border:1px solid #2a3566; border-radius:12px; color:#e7eef7;
+  cursor:pointer; touch-action:none; -webkit-touch-callout:none; user-select:none; }
+.ctrlBtn:active { background:#24408f; }
 
 /* Win banner overlay */
 #banner { position:absolute; inset:0; display:none; align-items:center; justify-content:center;

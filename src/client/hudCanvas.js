@@ -1,8 +1,10 @@
 // src/client/hudCanvas.js — in-game HUD drawn on a 2D overlay canvas over the 3D
-// stage: the strike/spin dial, the power meter, the current camera view, and the
-// pocketed balls. Pure canvas 2D drawing (no DOM widgets); main.js calls drawHud
-// once per render frame with the live values, or clearHud outside a game.
+// stage: the strike/spin dial, the left-middle power bar + drag-to-shoot cue
+// stick, the current camera view, and the pocketed-ball column. Pure canvas 2D
+// drawing; main.js calls drawHud once per render frame with the live values (or
+// clearHud outside a game), and input.js hit-tests powerBarRect() for the stick.
 import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
+import { CUE_DIMS } from './cue.js';
 
 let cv = null, ctx = null, dpr = 1;
 
@@ -27,7 +29,6 @@ export function clearHud() {
   if (ctx) ctx.clearRect(0, 0, cv.width, cv.height);
 }
 
-const VIEW_LABELS = { aim: 'Aim (down cue)', free: 'Free fly-around', top: 'Overhead' };
 const MARGIN = 16;
 const DIAL_R = 46;      // spin dial radius (cue-ball face)
 const DOT_R = 8;        // strike-point marker
@@ -42,11 +43,29 @@ export function drawHud(state = {}) {
   const w = cv.width / dpr, h = cv.height / dpr;
 
   drawSpinDial(w, h, strikeX, strikeY, view);
-  drawPowerMeter(w, h, power);
-  drawViewLabel(w, h, view);
+  drawPowerStick(power);
   drawPocketed(w, h, pocketed);
 
   ctx.restore();
+}
+
+// Geometry of the left-middle power bar, in CSS pixels (shared with input.js,
+// which hit-tests it for the drag-to-shoot stick). Null before the HUD inits.
+const POWER_BAR_W = 20;
+const POWER_BAR_MAXH = 300;
+export function powerBarRect() {
+  if (!cv) return null;
+  const w = cv.width / dpr, h = cv.height / dpr;
+  const barH = Math.min(POWER_BAR_MAXH, h * 0.5);
+  return { x: MARGIN + 6, yTop: (h - barH) / 2, w: POWER_BAR_W, h: barH };
+}
+
+// Geometry of the bottom-left spin dial (cue-ball face), in CSS pixels — shared
+// with input.js, which hit-tests it so you can click/drag the strike point.
+export function spinDialRect() {
+  if (!cv) return null;
+  const h = cv.height / dpr;
+  return { cx: MARGIN + DIAL_R, cy: h - MARGIN - DIAL_R, r: DIAL_R };
 }
 
 // Bottom-left: cue-ball face with crosshair + red strike dot, "Spin" caption above.
@@ -87,62 +106,106 @@ function drawSpinDial(w, h, sx, sy, view) {
   ctx.stroke();
 }
 
-// Vertical meter right of the dial; fills bottom→top, green→yellow→red.
-function drawPowerMeter(w, h, power) {
-  const bw = 16;
-  const bh = 2 * DIAL_R;
-  const x = MARGIN + 2 * DIAL_R + 16;
-  const y = h - MARGIN - bh;
+// Left-middle: a vertical power bar with a cue stick over it (tip at the top).
+// Dragging the stick down builds power; the tip marks how much (top = 0, bottom
+// = full). The stick is drawn with the REAL cue's proportions (CUE_DIMS) scaled
+// so its butt is STICK_BUTT_PX wide — that makes it far longer than the bar, so
+// it keeps a constant length and is simply clipped at the bar bottom. `power` 0..1.
+const STICK_BUTT_PX = 7;
+function drawPowerStick(power) {
+  const b = powerBarRect();
+  if (!b) return;
+  const { x, yTop, w: bw, h: bh } = b;
   const p = Math.max(0, Math.min(1, power));
+  const tipY = yTop + p * bh;
 
+  // Track.
   ctx.fillStyle = 'rgba(12,18,48,0.85)';
-  roundRect(x, y, bw, bh, 6); ctx.fill();
+  roundRect(x, yTop, bw, bh, 8); ctx.fill();
 
+  // Power fill (top → tip), green → yellow → red.
   if (p > 0.001) {
-    const fh = bh * p;
-    const grad = ctx.createLinearGradient(0, y + bh, 0, y);
+    const grad = ctx.createLinearGradient(0, yTop, 0, yTop + bh);
     grad.addColorStop(0, '#2ecc71');
     grad.addColorStop(0.5, '#f1c40f');
     grad.addColorStop(1, '#e63946');
+    ctx.save();
+    roundRect(x, yTop, bw, bh, 8); ctx.clip();
     ctx.fillStyle = grad;
-    ctx.fillRect(x, y + bh - fh, bw, fh);
+    ctx.fillRect(x, yTop, bw, tipY - yTop);
+    ctx.restore();
   }
 
+  // Track border.
   ctx.lineWidth = 1;
   ctx.strokeStyle = 'rgba(42,53,102,0.9)';
-  roundRect(x, y, bw, bh, 6); ctx.stroke();
+  roundRect(x, yTop, bw, bh, 8); ctx.stroke();
 
-  ctx.fillStyle = 'rgba(159,176,216,0.75)';
-  ctx.font = '11px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-  ctx.fillText('Power', x + bw / 2, y - 6);
+  // Cue stick with the REAL cue's proportions (scaled so the butt is
+  // STICK_BUTT_PX wide). tip → butt over CUE_DIMS.len, so it's much longer than
+  // the bar and gets clipped at the bottom — constant length, never rescaled.
+  const cx = x + bw / 2;
+  const sc = STICK_BUTT_PX / CUE_DIMS.buttR;   // px per game-metre
+  const tipR = CUE_DIMS.tipR * sc;
+  const buttR = CUE_DIMS.buttR * sc;
+  const buttY = tipY + CUE_DIMS.len * sc;
+  const ferruleLen = 0.02 * sc;                // real ferrule is ~0.02 m
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(x, yTop, bw, bh);                    // clip to the bar
+  ctx.clip();
+  // Shaft (tip → butt).
+  ctx.beginPath();
+  ctx.moveTo(cx - tipR, tipY);
+  ctx.lineTo(cx + tipR, tipY);
+  ctx.lineTo(cx + buttR, buttY);
+  ctx.lineTo(cx - buttR, buttY);
+  ctx.closePath();
+  ctx.fillStyle = '#b98a4a'; ctx.fill();
+  ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.stroke();
+  // White ferrule at the very tip.
+  ctx.fillStyle = '#f2efe6';
+  ctx.fillRect(cx - tipR * 1.05, tipY, tipR * 2.1, ferruleLen);
+  ctx.restore();
+
+  // Tip indicator line across the bar.
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x - 5, tipY); ctx.lineTo(x + bw + 5, tipY); ctx.stroke();
+
+  // Caption + percent.
+  ctx.fillStyle = 'rgba(159,176,216,0.9)'; ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText('Power', cx, yTop - 8);
+  if (p > 0.001) {
+    ctx.fillStyle = 'rgba(231,238,247,0.95)'; ctx.textBaseline = 'top';
+    ctx.fillText(`${Math.round(p * 100)}%`, cx, yTop + bh + 6);
+  }
 }
 
-// Bottom-left row, right of the power meter: the current camera view.
-function drawViewLabel(w, h, view) {
-  const bw = 16;                                  // power-meter width (mirrors drawPowerMeter)
-  const x = MARGIN + 2 * DIAL_R + 16 + bw + 20;   // just past the meter
-  const cy = h - MARGIN - DIAL_R;
-
-  ctx.textAlign = 'left';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = 'rgba(231,238,247,0.92)';
-  ctx.font = '13px sans-serif';
-  ctx.fillText(`View: ${VIEW_LABELS[view] || view}`, x, cy - 6);
-  ctx.fillStyle = 'rgba(159,176,216,0.75)';
-  ctx.font = '11px sans-serif';
-  ctx.fillText('V to cycle', x, cy + 12);
-}
-
-// Top-centre: a row of the pocketed balls (real solid/stripe colours + number).
+// Right side: one slot per object ball 1..15 in numerical order, stacked
+// top-down. A potted ball shows the real ball; a ball still in play shows an
+// empty circle — so the column is always 15 slots, some balls, some holes.
 function drawPocketed(w, h, pocketed) {
-  if (!pocketed || !pocketed.length) return;
-  const r = 18, gap = 9;
-  const total = pocketed.length * (2 * r + gap) - gap;
-  let x = (w - total) / 2 + r;
-  const y = MARGIN + r;
-  for (const n of pocketed) { drawBall(x, y, r, n); x += 2 * r + gap; }
+  const potted = new Set(pocketed || []);
+  const r = 13, gap = 6;
+  const x = w - MARGIN - r;
+  let y = MARGIN + r;
+  for (let n = 1; n <= 15; n++) {
+    if (potted.has(n)) drawBall(x, y, r, n);
+    else drawEmptySlot(x, y, r);
+    y += 2 * r + gap;
+  }
+}
+
+// An empty placeholder for a ball still on the table.
+function drawEmptySlot(x, y, r) {
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.stroke();
 }
 
 function drawBall(x, y, r, n) {

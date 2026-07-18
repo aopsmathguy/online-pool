@@ -6,6 +6,7 @@ import * as THREE from "/lib/three.module.js";
 import { scene } from './scene.js';
 import { TEX_V_STRETCH, R, RACK_QUAT } from '../shared/constants.js';
 import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
+import { isInsideAnyPocket } from '../shared/pockets.js';
 
 function makeBallTexture({ style, color = "#ffffff", number = null }) {
   const size = 256;
@@ -182,6 +183,19 @@ export function setCuePosition(x, z, y = R) {
 export function getCueMeshPosition() {
   const v = views.get(0);
   return v ? v.mesh.position : null;
+}
+
+// Numbers of balls that have visibly dropped into a pocket right now (centre
+// below the felt and over a cup). Lets the HUD mark a ball pocketed the instant
+// it sinks during a replay, instead of waiting for the shot to fully resolve.
+export function sunkNumbers() {
+  const out = [];
+  for (const v of views.values()) {
+    if (v.number == null) continue;   // skip the cue
+    const p = v.mesh.position;
+    if (p.y < -0.005 && isInsideAnyPocket(p.x, p.z)) out.push(v.number);
+  }
+  return out;
 }
 
 // Every ball currently rendered (id, number, y) — for ghost detection in tests.

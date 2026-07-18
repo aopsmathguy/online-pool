@@ -92,12 +92,17 @@ export function setReviewLayout(layout) {
   resetReview();
 }
 
-// Called from beginReplay with the already-expanded anim (frames carry .balls)
-// and the name of the player who took the shot.
-export function recordShot(anim, shooter) {
-  history.push({ anim, shooter: shooter || 'Player' });
+// Called from beginReplay with the already-expanded anim (frames carry .balls),
+// the name of the player who took the shot, and the pocketed set BEFORE it (so
+// the pocketed HUD can be rebuilt correctly as balls drop during the review).
+export function recordShot(anim, shooter, pocketedBefore) {
+  history.push({ anim, shooter: shooter || 'Player', pocketedBefore: (pocketedBefore || []).slice() });
   refreshSelect();
 }
+
+// The pocketed numbers as of the start of the loaded review shot (union with
+// balls currently below the felt gives the live pocketed column during review).
+export function reviewPocketedBaseline() { return cur ? cur.pocketedBefore : []; }
 
 // Dropdown label: "Shot N · <shooter>" plus the numbers sunk on that shot, if
 // any. Pocketed balls are exactly the anim's removals (the cue never appears —
@@ -151,6 +156,7 @@ function enter(i) {
     anim: h.anim, index: i, strikeDur, ballDur,
     duration: strikeDur + ballDur, t: 0, playing: false,
     cueStart: cue0 ? { x: cue0.x, y: cue0.y, z: cue0.z } : null,
+    pocketedBefore: h.pocketedBefore || [],
   };
   lastNow = performance.now();
   els.select.value = String(i);
