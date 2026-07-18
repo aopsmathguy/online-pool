@@ -54,8 +54,8 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 export function zoomCamera(deltaY) {
   const dir = Math.sign(deltaY);
   if (viewMode === 'top') {
-    // scroll up → camera higher
-    topHeightTarget = clamp(topHeightTarget - dir * TOP_H_STEP, TOP_H_MIN, TOP_H_MAX);
+    // scroll up → camera lower (zoom IN), matching the aim view
+    topHeightTarget = clamp(topHeightTarget + dir * TOP_H_STEP, TOP_H_MIN, TOP_H_MAX);
   } else if (viewMode === 'free') {
     // Free view height is on Space/Shift (held keys, see input.js), not scroll.
   } else {

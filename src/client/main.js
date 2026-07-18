@@ -210,10 +210,11 @@ function beginReplay(anim) {
   replay.anim = anim;
   replay.start = performance.now();
   replay.nextRemoval = 0;
-  // Post-shot gameState is deferred (afterReplay), so `gs` still names the
-  // shooter's turn here — grab their chip name for the review label.
+  // Post-shot gameState is deferred (afterReplay), so `gs` still holds the
+  // PRE-shot state here — grab the shooter's chip name and the balls already
+  // pocketed before this shot (the review's pocketed-column baseline).
   const shooter = (gs.chips && gs.chips[gs.current] && gs.chips[gs.current].text) || `Player ${gs.current + 1}`;
-  recordShot(anim, shooter);   // stash the expanded shot for the review player
+  recordShot(anim, shooter, gs.pocketed || []);   // stash the shot for the review player
 }
 
 function tickReplay(now) {
@@ -468,6 +469,7 @@ window.addEventListener('error', e => window.__errors.push(String(e.message || e
 window.__net = { socket, state: () => gs, me: () => net };
 window.__ballIds = ballIds;   // debug: client-side rendered ball set (ghost detection)
 window.__sunk = sunkNumbers;  // debug: balls currently dropped into a pocket
+window.__reviewBaseline = reviewPocketedBaseline;   // debug: review pre-shot pocketed set
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');
