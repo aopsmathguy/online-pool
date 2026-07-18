@@ -12,18 +12,21 @@
 //      covers >90° cuts automatically: the corridor to the ghost then clips
 //      the target ball itself.
 // Among the open shots the bot picks the one with the highest SCORE (see
-// shotScore) = (a − R) / f, where f is a geometric difficulty measure
+// shotScore) = gap / f, where f is a geometric difficulty measure
 //
 //   f = d2 · sqrt(d1² − 4R²·sin²θ2) / (2R·cosθ2)
 //
 // (d1 = cue→object-ball, d2 = object-ball→aim-point, θ2 = the acute cut angle),
-// and `a` is the pocket's effective aperture seen from the object ball: with p1
-// the mouth endpoint farther from the ball and p2 the nearer, project p2 onto
-// the line p1→ball to get p3; a = |p2 − p3|. So wider openings and easier
-// angles score higher. The aim point is (a + R)/2 from p2 along p2→p3 for a
-// glancing opening, but on a straight-on shot (mouth-line vs midpoint→ball
-// angle > 45°) it's just the mouth midpoint; the bot aims at that shot's ghost
-// ball, then perturbs the aim by a small random angle so it misses sometimes.
+// and `gap` is the APPARENT pocket opening seen from the object ball: with p1
+// the mouth endpoint farther from the ball and p2 the nearer, project p1 and p2
+// onto the axis perpendicular to the aim→ball sightline and take the distance
+// between the projections — how wide the mouth looks from the ball. Wider-
+// looking openings and easier angles score higher. The aim point is the
+// midpoint of A and B, where A is one ball radius inside the p1 jaw along the
+// bisector of (p1→p2, p1→ball) and B is the analogue at p2 — i.e. the centre of
+// the window in which a ball of radius R clears both jaws (no split cases). The
+// bot aims at that shot's ghost ball, then perturbs the aim by a small random
+// angle so it misses sometimes.
 //
 // With NO open shot it plays a safety, in order of preference:
 //   1. a direct hit on a legal ball whose follow line avoids the pockets
@@ -126,53 +129,48 @@ function legalTargetNumbers(sim) {
   return open.length ? open : onTable;
 }
 
-// Effective aperture of pocket `p` as seen from object ball `t`, and the aim
-// point that opening implies:
-//   - p1, p2 = the mouth endpoints, p1 the one FARTHER from the ball.
-//   - Project p2 onto the line from p1 through the ball → p3. a = |p2 − p3| is
-//     the opening width perpendicular to that grazing sightline (used for
-//     scoring regardless of the aim rule below).
-//   - Aim point: on a STRAIGHT-ON shot — the acute angle between the mouth
-//     line (p1→p2) and the mouth-midpoint→ball line exceeds 45° — just aim at
-//     the mouth midpoint. On a shallower (glancing) approach, aim at the point
-//     (a + R)/2 from p2 along p2→p3 (offset off the near jaw toward the far
-//     grazing line, biased R/2 past the p2p3 midpoint).
-// Returns { aim, aperture: a } or null if the gap is too tight for the ball
-// (a ≤ R), i.e. the ball can't physically pass at this angle.
+// Aim point + apparent opening of pocket `p` as seen from object ball `t`.
+// p1 = mouth endpoint FARTHER from the ball, p2 = the nearer one. No split cases:
+//   A = p1 + R·bisector(p1→p2, p1→ball)   — R inside the p1 jaw, angled for approach
+//   B = p2 + R·bisector(p2→p1, p2→ball)   — the analogue at the p2 jaw
+// A and B bound the window of ball-centre positions that clear both jaws; the
+// aim is their midpoint (window centre). `gap` (for scoring) is the APPARENT
+// opening: p1 and p2 projected onto the axis ⟂ to the aim→ball sightline, and the
+// distance between the projections. Returns { aim, gap } or null when the gap is
+// narrower than the ball (< 2R) — it can't physically pass at this angle.
+function bisectorPoint(from, toward, ball) {
+  let ax = toward.x - from.x, az = toward.z - from.z;
+  let al = Math.hypot(ax, az); if (al < 1e-9) return null; ax /= al; az /= al;
+  let bx = ball.x - from.x, bz = ball.z - from.z;
+  let bl = Math.hypot(bx, bz); if (bl < 1e-9) return null; bx /= bl; bz /= bl;
+  let hx = ax + bx, hz = az + bz;                  // sum of unit dirs = bisector
+  const hl = Math.hypot(hx, hz); if (hl < 1e-9) return null; hx /= hl; hz /= hl;
+  return { x: from.x + hx * R, z: from.z + hz * R };
+}
 function pocketAim(p, t) {
   const d1 = Math.hypot(p.e1.x - t.x, p.e1.z - t.z);
   const d2 = Math.hypot(p.e2.x - t.x, p.e2.z - t.z);
   const [p1, p2] = d1 >= d2 ? [p.e1, p.e2] : [p.e2, p.e1];
-  let ux = t.x - p1.x, uz = t.z - p1.z;
-  const ul = Math.hypot(ux, uz);
-  if (ul < 1e-9) return null;
-  ux /= ul; uz /= ul;
-  const proj = (p2.x - p1.x) * ux + (p2.z - p1.z) * uz;
-  const p3x = p1.x + ux * proj, p3z = p1.z + uz * proj;
-  let ax = p3x - p2.x, az = p3z - p2.z;          // p2 → p3 (⟂ to the sightline)
-  const a = Math.hypot(ax, az);
-  if (a <= R) return null;
 
-  // Straight-on test: acute angle between the mouth line and the sightline from
-  // the mouth midpoint to the ball. |cos| < cos45° ⇒ angle > 45° ⇒ straight on.
-  const mx = (p1.x + p2.x) / 2, mz = (p1.z + p2.z) / 2;
-  let mux = p2.x - p1.x, muz = p2.z - p1.z;
-  const ml = Math.hypot(mux, muz) || 1; mux /= ml; muz /= ml;
-  let sx = t.x - mx, sz = t.z - mz;
-  const sl = Math.hypot(sx, sz) || 1; sx /= sl; sz /= sl;
-  if (Math.abs(mux * sx + muz * sz) < Math.SQRT1_2) {
-    return { aim: { x: mx, z: mz }, aperture: a };   // aim the mouth midpoint
-  }
+  const A = bisectorPoint(p1, p2, t);
+  const B = bisectorPoint(p2, p1, t);
+  if (!A || !B) return null;
+  const aim = { x: (A.x + B.x) / 2, z: (A.z + B.z) / 2 };
 
-  ax /= a; az /= a;
-  const off = (a + R) / 2;
-  return { aim: { x: p2.x + ax * off, z: p2.z + az * off }, aperture: a };
+  // Apparent gap: |p1 − p2| projected onto the axis ⟂ to the aim→ball sightline.
+  let sx = aim.x - t.x, sz = aim.z - t.z;
+  const sl = Math.hypot(sx, sz); if (sl < 1e-9) return null; sx /= sl; sz /= sl;
+  const nx = -sz, nz = sx;                          // unit ⟂ to the sightline
+  const gap = Math.abs((p1.x - p2.x) * nx + (p1.z - p2.z) * nz);
+  if (gap < 2 * R) return null;                     // ball (diam 2R) can't fit
+
+  return { aim, gap };
 }
 
 // --- Shot enumeration -----------------------------------------------------------
 // Every (target, pocket) pair whose target→aim-point corridor is clear and
 // whose pocket-approach angle is acceptable. Adds the per-shot aim point, its
-// effective aperture (for scoring), the ghost-ball centre (gx, gz) and the unit
+// apparent gap (for scoring), the ghost-ball centre (gx, gz) and the unit
 // direction (dx, dz) of travel target→aim-point.
 function potLines(objects, targetNumbers) {
   const lines = [];
@@ -190,7 +188,7 @@ function potLines(objects, targetNumbers) {
       // Ghost must be somewhere the cue ball can actually sit.
       if (Math.abs(gx) > tableW / 2 - R * 0.9 || Math.abs(gz) > tableH / 2 - R * 0.9) continue;
       if (!pathClear(t.x, t.z, aim.x, aim.z, objects, [t])) continue; // ball's road blocked
-      lines.push({ t, p, dx, dz, gx, gz, dPocket, aim, aperture: pa.aperture });
+      lines.push({ t, p, dx, dz, gx, gz, dPocket, aim, gap: pa.gap });
     }
   }
   return lines;
@@ -230,14 +228,14 @@ function shotDifficulty(cue, s) {
   return s.dPocket * Math.sqrt(under) / (2 * R * cos2);
 }
 
-// Score of an open shot — LARGER is better. The effective pocket aperture (how
-// much room the ball has to pass, minus its own radius) over the geometric
-// difficulty f: (a − R) / f. A wide-open, easy-angle shot scores high; a tight
-// or thin-cut one scores low.
+// Score of an open shot — LARGER is better. The apparent pocket opening (how
+// wide the mouth looks from the object ball) over the geometric difficulty f:
+// gap / f. A wide-open, easy-angle shot scores high; a tight or thin-cut one
+// scores low.
 function shotScore(cue, s) {
   const f = shotDifficulty(cue, s);
   if (!(f > 0) || !isFinite(f)) return -Infinity;
-  return (s.aperture - R) / f;
+  return s.gap / f;
 }
 
 function bestShot(cue, shots) {

@@ -52,7 +52,27 @@
   <div id="game" class="wrap">
     <div class="stageWrap">
       <canvas id="stage"></canvas>
+      <!-- In-game HUD (spin dial, power meter, camera view, pocketed balls),
+           drawn over the 3D stage. pointer-events:none so it never eats input. -->
+      <canvas id="hudCanvas"></canvas>
       <div id="banner"></div>
+      <!-- Collapsible shot-replay player: pick a past shot, then play/pause/
+           restart and scrub it like a video (see shotReview.js). -->
+      <div id="replayPanel" class="replayPanel collapsed">
+        <button id="replayToggle" class="replayToggle">Replays ▸</button>
+        <div class="replayBody">
+          <select id="replaySelect" class="replaySelect"></select>
+          <div class="replayControls">
+            <button id="replayRestart" title="Restart">⏮</button>
+            <button id="replayStepBack" title="Step back 4 ms">−4</button>
+            <button id="replayPlay" title="Play / Pause">▶</button>
+            <button id="replayStepFwd" title="Step forward 4 ms">+4</button>
+            <button id="replayExit" title="Back to live game">✕</button>
+          </div>
+          <div class="replayTimeRow"><span id="replayTime" class="replayTime">0.0 / 0.0s</span></div>
+          <input id="replayScrub" class="replayScrub" type="range" min="0" max="1000" value="0" />
+        </div>
+      </div>
     </div>
     <aside>
       <h2>Online Pool</h2>
@@ -68,7 +88,7 @@
         <button id="btnNewGame">New Game</button>
         <button id="btnLeaveGame">Leave</button>
       </div>
-      <div id="viewInfo">View: <b id="viewName">Aim</b> <span>(V to cycle)</span></div>
+      <h3>Controls</h3>
       <p>Move mouse to aim (only while sighting down the cue), hold left-click to draw
       the cue back, release to shoot. Hold <b>ALT</b> + move mouse to set spin (<b>X</b>
       resets). <b>V</b> cycles the camera: down-the-stick aim → free fly-around
@@ -76,12 +96,6 @@
       the table to lock the mouse; ESC releases it.</p>
       <p>After a foul the other player gets <b>ball in hand</b> (overhead view — move
       the mouse to position the cue ball, then click to place it).</p>
-      <h3>Spin</h3>
-      <div id="strikeWidget"><div id="strikeDot"></div></div>
-      <h3>Power</h3>
-      <div id="powerBar"><div id="powerCover"></div></div>
-      <h3 id="pocketedTitle">Pocketed</h3>
-      <div id="pocketed">(none)</div>
     </aside>
   </div>
 

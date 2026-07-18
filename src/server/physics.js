@@ -11,13 +11,22 @@ import { g, e_rail, mu_wall, FIXED_DT, mu_felt_linear, spin_decel_rad_s2 } from 
 // Collision filter groups (bit flags). The felt has its own group so we can
 // selectively disable ball↔felt contact on a per-ball basis when the ball is
 // over a pocket mouth, letting it fall cleanly into the cup.
-export const CG_FELT   = 1 << 1;  // 2
-export const CG_BALL   = 1 << 2;  // 4
-export const CG_RAIL   = 1 << 3;  // 8
-export const CG_POCKET = 1 << 4;  // 16
+export const CG_FELT     = 1 << 1;  // 2  — flat felt plane (used away from pockets)
+export const CG_BALL     = 1 << 2;  // 4
+export const CG_RAIL     = 1 << 3;  // 8
+export const CG_POCKET   = 1 << 4;  // 16
+export const CG_SUNK     = 1 << 5;  // 32 — a ball resting in a pocket cup
+export const CG_FELTMESH = 1 << 6;  // 64 — triangulated felt (real pocket holes), used near pockets
 
+// Away from pockets a ball rolls on the flat felt PLANE (cheap, snag-free).
 export const MASK_BALL_NORMAL      = CG_FELT | CG_RAIL | CG_POCKET | CG_BALL;
-export const MASK_BALL_OVER_POCKET = CG_RAIL | CG_POCKET | CG_BALL; // no felt
+// Near a pocket it swaps to the triangulated felt MESH, which has the real hole,
+// so it rolls over the lip and physically tips in (no flat plane holding it up).
+export const MASK_BALL_NEAR_POCKET = CG_FELTMESH | CG_RAIL | CG_POCKET | CG_BALL;
+// A pocketed ball collides with the cup and OTHER pocketed balls (so it drops to
+// the bottom and piles up), but not the felt (falls in), the rails, or the
+// in-play balls — a ball in the pocket must not disturb balls still on the table.
+export const MASK_SUNK             = CG_POCKET | CG_SUNK;
 
 let AmmoLib, tmpTransform, tmpVec3;
 

@@ -10,12 +10,16 @@
 //   - V: cycle camera — down-the-stick aim → free fly-around → overhead
 //   - Click on canvas to lock the pointer; ESC to unlock.
 //
+// Free fly-around view: WASD walk and Space/Shift go up/down whether or not the
+// pointer is locked, but MOUSE-LOOK only turns the view while the pointer is
+// locked (cursor hidden). Click the canvas to lock; ESC to release.
+//
 // Ball-in-hand: when handlers.isPlacing() is true, the cursor (visible in the
 // overhead view) points at the table — onPlaceMove receives the absolute cursor
 // position and a left click confirms the placement (onPlaceConfirm).
 //
-// The pointer is locked (cursor hidden, for mouselook) only in the aim/free
-// views; the overhead view keeps the OS cursor visible.
+// The pointer is locked (cursor hidden, for mouselook) in the aim/free views;
+// the overhead view keeps the OS cursor visible.
 import { addYaw, addPitch, addStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
          getViewMode, freeLookMouse, freeMove } from './cue.js';
@@ -50,9 +54,11 @@ export function bindInput(canvas, handlers) {
     return (k === 'w' || k === 'a' || k === 's' || k === 'd') ? k : null;
   };
 
-  // Lock the pointer (hides the cursor for mouselook) ONLY in the aim/free
-  // views. The overhead view keeps the OS cursor visible — you point at the
-  // table (ball-in-hand placement raycasts the real cursor position).
+  // Lock the pointer (hides the cursor for mouselook) in the aim/free views; the
+  // overhead view keeps the OS cursor visible (ball-in-hand placement raycasts
+  // the real cursor). Free-fly ALSO works with the cursor visible: when unlocked,
+  // moving the mouse still turns the view (see mousemove) and WASD/Space/Shift
+  // still fly (see keydown/tick).
   canvas.addEventListener('click', () => {
     if (!pointerLocked && getViewMode() !== 'top') canvas.requestPointerLock();
   });
@@ -87,6 +93,8 @@ export function bindInput(canvas, handlers) {
     if (getViewMode() === 'free') {
       // Free-fly spectator camera: mouse turns the view — never the aim, and
       // never the ball-in-hand position (checked before isPlacing on purpose).
+      // Look only works while the pointer is locked (cursor hidden); with the
+      // cursor visible the mouse is free to move without swinging the view.
       if (pointerLocked) freeLookMouse(e.movementX, e.movementY);
       return;
     }
@@ -131,10 +139,12 @@ export function bindInput(canvas, handlers) {
     if (charging) { charging = false; setPullback(0); e.preventDefault(); return; }
     if (e.key === 'Alt') altHeld = true;
     if (e.key === 'v' || e.key === 'V') onToggleView();   // cycle aim → free → overhead
+    // Free-fly movement (WASD/Space/Shift) works in free view whether or not the
+    // pointer is locked, so the cursor can stay visible.
+    const k = moveKeyFor(e);
+    if (k && (getViewMode() === 'free' || pointerLocked)) { moveKeys[k] = true; e.preventDefault(); return; }
     if (!pointerLocked) return;
     if (e.key === 'x' || e.key === 'X') { resetStrikeOffset(); e.preventDefault(); }
-    const k = moveKeyFor(e);
-    if (k) { moveKeys[k] = true; e.preventDefault(); }   // Space/Shift/WASD
   });
   document.addEventListener('keyup', e => {
     if (e.key === 'Alt') altHeld = false;
@@ -167,7 +177,8 @@ export function bindInput(canvas, handlers) {
       setPullback(Math.min(getMaxPullback(), getPullback() + CHARGE_RATE * dt));
     }
     // Free-fly movement: WASD walk (relative to look yaw), Space up / Shift down.
-    if (pointerLocked && getViewMode() === 'free') {
+    // Works whether or not the pointer is locked (cursor may be visible).
+    if (getViewMode() === 'free') {
       const fwd = (moveKeys.w ? 1 : 0) - (moveKeys.s ? 1 : 0);
       const strafe = (moveKeys.d ? 1 : 0) - (moveKeys.a ? 1 : 0);
       const vert = (moveKeys.up ? 1 : 0) - (moveKeys.down ? 1 : 0);

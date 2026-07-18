@@ -1,6 +1,6 @@
-// src/hud.js — render the sidebar HUD from a gameState packet (client-only).
-// Ported from the old game.js updateHUD, but driven by a plain state object the
-// server sends instead of local match state.
+// src/hud.js — render the sidebar HUD (players + status) from a gameState packet
+// (client-only). The spin/power/view/pocketed HUD lives on the overlay canvas
+// (hudCanvas.js). Driven by a plain state object the server sends.
 
 export function renderHUD(gs) {
   const turnEl = document.getElementById('turnInfo');
@@ -27,10 +27,4 @@ export function renderHUD(gs) {
     if (over) { banner.textContent = gs.message; banner.classList.add('show'); }
     else banner.classList.remove('show');
   }
-}
-
-export function renderPocketed(pocketed) {
-  const el = document.getElementById('pocketed');
-  if (!el) return;
-  el.textContent = pocketed && pocketed.length ? pocketed.map(n => `#${n}`).join(' ') : '(none)';
 }

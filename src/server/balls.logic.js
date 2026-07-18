@@ -1,6 +1,6 @@
 // src/balls.logic.js — ball physics bodies + rack, with NO Three/rendering.
 // Everything is parameterized by (world, balls) so the server can run many
-// tables at once. A "ball" here is { body, number, style, color, overPocket }.
+// tables at once. A "ball" here is { body, number, style, color, nearPocket }.
 // The client mirrors these as meshes in balls.view.js keyed by the same id/index.
 import { R, m, mu_ball, e_ball, RACK_QUAT } from '../shared/constants.js';
 import {
@@ -45,7 +45,7 @@ export function resetRack(world, balls, layout) {
     body.setSleepingThresholds(0.0002, 0.0002);
     body.setContactProcessingThreshold(0.);
 
-    balls.push({ body, style, color, number, overPocket: false });
+    balls.push({ body, style, color, number, nearPocket: false });
   }
   return balls;
 }
@@ -68,9 +68,9 @@ export function setBallPosition(world, b, x, z, y = R) {
   b.body.setLinearVelocity(tmpVec3);
   b.body.setAngularVelocity(tmpVec3);
   b.body.activate();
-  if (b.overPocket) {
+  if (b.nearPocket) {
     setBodyFilter(world, b.body, CG_BALL, MASK_BALL_NORMAL);
-    b.overPocket = false;
+    b.nearPocket = false;
   }
 }
 

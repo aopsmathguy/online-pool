@@ -55,6 +55,34 @@ export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
       return group;
 }
 
+// Real felt-cloth photo (assets/felt.jpg) used as a grayscale map that MODULATES
+// the green material colour — bright fibres × green = green felt with the actual
+// fabric detail. The image is drawn onto a power-of-two canvas (so RepeatWrapping
+// + mipmaps work everywhere), desaturated (kills any colour cast so the green is
+// pure) and brightness-normalised (so the multiply keeps the green vibrant rather
+// than darkening it). The source tile is seamless, so it repeats without a join.
+const FELT_REPEAT = 4;                 // texture tiles ≈ every 0.3 m of felt
+const FELT_URL = '/assets/felt.jpg';
+function makeFeltTexture() {
+      const size = 512;                // power-of-two
+      const c = document.createElement('canvas'); c.width = c.height = size;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#cfcfcf'; ctx.fillRect(0, 0, size, size);   // neutral until loaded
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(FELT_REPEAT, FELT_REPEAT);
+      tex.anisotropy = 8;
+      tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+      const img = new Image();
+      img.onload = () => {
+        ctx.filter = 'grayscale(1) brightness(1.35) contrast(1.1)';
+        ctx.drawImage(img, 0, 0, size, size);
+        tex.needsUpdate = true;
+      };
+      img.src = FELT_URL;
+      return tex;
+}
+
 export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       if (!points || points.length < 3) throw new Error("Need ≥3 points");
       const {
@@ -64,6 +92,7 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
         receiveShadow = true,
         castShadow = false,
         holes = [],
+        felt = false,        // add the woven-felt grain (the green table cloth)
       } = options;
 
       const shape = new THREE.Shape();
@@ -94,6 +123,7 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       const mat = new THREE.MeshStandardMaterial({
         color, metalness, roughness, side: THREE.DoubleSide,
       });
+      if (felt) mat.map = makeFeltTexture();   // grain modulates the green colour
 
       const mesh = new THREE.Mesh(geom, mat);
       mesh.receiveShadow = receiveShadow;

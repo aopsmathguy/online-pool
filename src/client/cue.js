@@ -223,7 +223,10 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 const _tmpRight = new THREE.Vector3();
 const _tmpStickUp = new THREE.Vector3();
 const _tmpQuat = new THREE.Quaternion();
-export function updateCueAndCamera(cuePos) {
+// Position + orient the cue stick from the current aim state, WITHOUT touching
+// the camera. Split out of updateCueAndCamera so the shot-replay player can pose
+// the stick (draw-back + strike) in any camera view.
+export function updateCueStick(cuePos) {
   if (!stickGroup) return;
 
   const stickDir = getShotDir();        // 3D back→tip direction (includes pitch)
@@ -259,8 +262,12 @@ export function updateCueAndCamera(cuePos) {
   // Orient: local +X (back→tip) → stickDir
   _tmpQuat.setFromUnitVectors(_xAxis, stickDir);
   stickGroup.quaternion.copy(_tmpQuat);
+}
 
-  // Anchor the camera orbit to this cue position, then place the camera.
+// Pose the stick AND orbit the camera to the cue ball (the aiming view).
+export function updateCueAndCamera(cuePos) {
+  if (!stickGroup) return;
+  updateCueStick(cuePos);
   cameraAnchor.x = cuePos.x;
   cameraAnchor.y = cuePos.y;
   cameraAnchor.z = cuePos.z;
@@ -320,12 +327,14 @@ export function placeCamera() {
   // pitched stick direction (butt→tip) matches the server's shot dir.
   const dx = aim.x * cp, dy = -sp, dz = aim.z * cp;
 
-  // Perpendicular clearance above the stick. Follow english (strikeY > 0)
-  // raises the tip; track that so the stick never rises back into frame.
-  // Offsetting the camera and the look target by the SAME amount keeps the
-  // sightline parallel to the stick (looking along it from above) rather
-  // than tilting the view down onto it.
-  const overStick = CAM_RAISE + Math.max(0, state.strikeY) * R * 0.7;
+  // Perpendicular clearance above the stick. The tip is shifted along the
+  // stick's up-vector by strikeY·R·0.7 (follow up, draw down — see the syOff in
+  // updateCueAndCamera); track the FULL shift, not just the follow side, so the
+  // gap above the stick stays exactly CAM_RAISE whether the player is putting
+  // follow or draw. Offsetting the camera and the look target by the SAME amount
+  // keeps the sightline parallel to the stick (looking along it from above)
+  // rather than tilting the view down onto it.
+  const overStick = CAM_RAISE + state.strikeY * R * 0.7;
 
   // The clearance is measured PERPENDICULAR to the stick, not vertically: with
   // an elevated cue a purely vertical raise would sit closer to the (tilted)

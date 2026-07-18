@@ -12,16 +12,17 @@ import {
 } from '../shared/constants.js';
 import {
   createWorld, createRigidBody, setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
-  CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, MASK_BALL_NORMAL, MASK_BALL_OVER_POCKET,
+  CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, CG_SUNK, CG_FELTMESH,
+  MASK_BALL_NORMAL, MASK_BALL_NEAR_POCKET, MASK_SUNK,
 } from './physics.js';
-import { createPhysicsPolyline, createCylindricalCup } from './geometry.physics.js';
-import { rail_pts } from '../shared/table.js';
-import { resetRack, setBallPosition, spotBall, pocketBall } from './balls.logic.js';
+import { createPhysicsPolyline, createCylindricalCup, createFeltMesh } from './geometry.physics.js';
+import { rail_pts, felt_pts } from '../shared/table.js';
+import { resetRack, setBallPosition, spotBall } from './balls.logic.js';
 import { createGame } from '../shared/game.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
 import { cross, lenSq, normalize } from '../shared/vec3.js';
 import {
-  pocketPositions, POCKET_Y_THRESHOLD, isInsideAnyPocket, isOverPocketMouth,
+  pocketPositions, POCKET_Y_THRESHOLD, isInsideAnyPocket, isNearPocket,
 } from '../shared/pockets.js';
 import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packets.js';
 
@@ -74,6 +75,7 @@ export { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER };
 
 const railPointsShared = rail_pts(tableW, tableH);
 const railClearPts = densify(railPointsShared);   // sampled rail for cue-clearance
+const feltPtsShared = felt_pts(tableW, tableH);    // felt outline (with pocket cutouts) for the trimesh
 
 export class RoomSim {
   constructor(rulesetId) {
@@ -81,13 +83,22 @@ export class RoomSim {
     this.balls = [];
     this.game = createGame(rulesetId, this.balls);
 
-    // Static felt plane (edge-free; pockets are done via per-ball mask toggling).
+    // Felt is modelled two ways. AWAY from pockets a ball rolls on this flat,
+    // edge-free plane (cheap, snag-free). NEAR a pocket updatePocketMasks swaps
+    // the ball onto the triangulated felt below, which has the real hole, so it
+    // rolls over the lip and tips in. The two are coplanar (y=0), so the swap
+    // never pops the ball.
     const planeShape = new AmmoLib.btStaticPlaneShape(new AmmoLib.btVector3(0, 1, 0), 0);
     const feltBody = createRigidBody(this.world, {
       mass: 0, shape: planeShape, pos: { x: 0, y: 0, z: 0 }, quat: { x: 0, y: 0, z: 0, w: 1 },
       fric: mu_ground, rest: e_table, group: CG_FELT, mask: CG_BALL,
     });
     feltBody.setUserIndex(3);
+
+    // Triangulated felt (real pocket holes), collided with only near a pocket.
+    const feltMesh = createFeltMesh(this.world, feltPtsShared, 0);
+    feltMesh.setUserIndex(3);
+    setBodyFilter(this.world, feltMesh, CG_FELTMESH, CG_BALL);
 
     // Rails.
     const railBody = createPhysicsPolyline(this.world, railPointsShared, rodR, wireY, {
@@ -103,12 +114,13 @@ export class RoomSim {
         mu: mu_pocket, e: e_pocket, pos: { x, y: -0.21, z },
       });
       cup.setUserIndex(4);
-      setBodyFilter(this.world, cup, CG_POCKET, CG_BALL);
+      setBodyFilter(this.world, cup, CG_POCKET, CG_BALL | CG_SUNK);   // holds live + pocketed balls
     }
 
     this.interact = PH_AIMING;
     this.acc = 0;
     this.pocketedList = [];
+    this.sunk = [];               // balls resting in pockets (kept for display, not in play)
     this.ballByPtr = new Map();
     this.cuePtr = 0;
     this.placePos = { x: HEAD_STRING_X, z: 0 };
@@ -127,6 +139,8 @@ export class RoomSim {
     if (changeGame) this.game.setRuleset(changeGame);
     else this.game.reset();
     const layout = this.game.rackLayout({ tableW, tableH });
+    for (const b of this.sunk) this.world.removeRigidBody(b.body);   // clear last game's pocketed balls
+    this.sunk = [];
     resetRack(this.world, this.balls, layout);
     this.balls.forEach((b, i) => { b.id = i; b.scratched = false; b.pendingSpot = false; });
     this.settleRack();
@@ -236,7 +250,11 @@ export class RoomSim {
     cue.setAngularVelocity(tmpVec3);
 
     // Simulate the whole shot to rest RIGHT NOW and hand back the recording.
-    return this.runShotAndRecord();
+    // Carry the cue params (with the FINAL, floor-raised pitch, and pullback =
+    // power) so the client can replay the stick's draw-back + strike.
+    return this.runShotAndRecord({
+      yaw: p.yaw, pitch, strikeX: p.strikeX, strikeY: p.strikeY, pullback: p.power,
+    });
   }
 
   // Run the physics from strike to rest synchronously, capturing a keyframe
@@ -245,7 +263,7 @@ export class RoomSim {
   // shot is then resolved (rules, respots, phase transitions) before
   // returning, so by the time the packet leaves the server the room is
   // already in its post-shot state. Returns { packet, durationMs }.
-  runShotAndRecord() {
+  runShotAndRecord(shot) {
     const frames = [this.captureFrame()];         // frame 0 is full (delta baseline)
     const removals = [];
     let simT = 0, frameAcc = 0;
@@ -256,19 +274,23 @@ export class RoomSim {
       if (frameAcc >= REPLAY_FRAME_DT - 1e-9) {
         frameAcc -= REPLAY_FRAME_DT;
         this.updatePocketMasks();
-        for (const id of this.checkPocketed()) removals.push({ id, frame: frames.length });
+        this.checkPocketed();                     // sinks pocketed balls (not removed yet)
         frames.push(this.captureFrame(true));     // delta: moving balls only
         if (this.ballsAtRest()) break;
       }
     }
     this.respotPending();      // everything has stopped → put off-table balls back
-    frames.push(this.captureFrame(true));   // final resting frame incl. respots
+    frames.push(this.captureFrame(true));   // final resting frame incl. respots + settled cups
+    // The shot is over: NOW remove the pocketed balls (they've been shown dropping
+    // in). The removal lands on this final frame, so their meshes clear as the
+    // replay ends rather than vanishing mid-shot.
+    for (const r of this.clearSunk(frames.length - 1)) removals.push(r);
     this.game.endShot();
     if (this.game.isOver()) this.interact = PH_OVER;
     else if (this.game.needsBallInHand()) this.startPlacement({ behindLine: false });
     else this.interact = PH_AIMING;
     return {
-      packet: { dtMs: REPLAY_FRAME_DT * 1000, frames, removals },
+      packet: { dtMs: REPLAY_FRAME_DT * 1000, shot, frames, removals },
       durationMs: frames.length * REPLAY_FRAME_DT * 1000,
     };
   }
@@ -283,25 +305,28 @@ export class RoomSim {
   captureFrame(delta = false) {
     if (!delta) { this.sentPos = new Map(); this.sentRot = new Map(); }
     const pos = [], rot = [];
-    for (const b of this.balls) {
-      const t = b.body.getWorldTransform();
-      const o = t.getOrigin(), q = t.getRotation();
-      const p = { id: b.id, x: o.x(), y: o.y(), z: o.z() };
-      const lp = this.sentPos.get(b.id);
-      if (!lp || Math.abs(p.x - lp.x) >= POS_EPS || Math.abs(p.y - lp.y) >= POS_EPS
-              || Math.abs(p.z - lp.z) >= POS_EPS) {
-        this.sentPos.set(b.id, p);
-        pos.push(p);
-      }
-      const r = { id: b.id, qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w() };
-      const lr = this.sentRot.get(b.id);
-      if (!lr || Math.abs(r.qx - lr.qx) >= QUAT_EPS || Math.abs(r.qy - lr.qy) >= QUAT_EPS
-              || Math.abs(r.qz - lr.qz) >= QUAT_EPS || Math.abs(r.qw - lr.qw) >= QUAT_EPS) {
-        this.sentRot.set(b.id, r);
-        rot.push(r);
-      }
-    }
+    for (const b of this.balls) this.captureBall(b, pos, rot);
+    for (const b of this.sunk) this.captureBall(b, pos, rot);   // balls resting in pockets
     return { pos, rot };
+  }
+
+  captureBall(b, pos, rot) {
+    const t = b.body.getWorldTransform();
+    const o = t.getOrigin(), q = t.getRotation();
+    const p = { id: b.id, x: o.x(), y: o.y(), z: o.z() };
+    const lp = this.sentPos.get(b.id);
+    if (!lp || Math.abs(p.x - lp.x) >= POS_EPS || Math.abs(p.y - lp.y) >= POS_EPS
+            || Math.abs(p.z - lp.z) >= POS_EPS) {
+      this.sentPos.set(b.id, p);
+      pos.push(p);
+    }
+    const r = { id: b.id, qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w() };
+    const lr = this.sentRot.get(b.id);
+    if (!lr || Math.abs(r.qx - lr.qx) >= QUAT_EPS || Math.abs(r.qy - lr.qy) >= QUAT_EPS
+            || Math.abs(r.qz - lr.qz) >= QUAT_EPS || Math.abs(r.qw - lr.qw) >= QUAT_EPS) {
+      this.sentRot.set(b.id, r);
+      rot.push(r);
+    }
   }
 
   applyPlaceMove(playerIdx, x, z) {
@@ -335,7 +360,7 @@ export class RoomSim {
   // delta-encoded, so it also wipes out any accumulated sub-eps residue.
   ballsFrame() {
     return {
-      items: this.balls.map(b => {
+      items: this.balls.concat(this.sunk).map(b => {
         const t = b.body.getWorldTransform();
         const o = t.getOrigin(), q = t.getRotation();
         return { id: b.id, x: o.x(), y: o.y(), z: o.z(), qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w() };
@@ -397,15 +422,18 @@ export class RoomSim {
     }
   }
 
+  // Near a pocket, swap the ball onto the triangulated felt (real hole) so it can
+  // tip in; elsewhere keep it on the flat plane. Just a collision-filter switch —
+  // the two felt surfaces are coplanar, so nothing pops.
   updatePocketMasks() {
     for (const b of this.balls) {
       if (b.pendingSpot) continue;
       const o = b.body.getWorldTransform().getOrigin();
-      const overMouth = isOverPocketMouth(o.x(), o.z());
-      if (overMouth === b.overPocket) continue;
-      setBodyFilter(this.world, b.body, CG_BALL, overMouth ? MASK_BALL_OVER_POCKET : MASK_BALL_NORMAL);
-      b.overPocket = overMouth;
-      if (overMouth) b.body.activate();
+      const near = isNearPocket(o.x(), o.z());
+      if (near === b.nearPocket) continue;
+      setBodyFilter(this.world, b.body, CG_BALL, near ? MASK_BALL_NEAR_POCKET : MASK_BALL_NORMAL);
+      b.nearPocket = near;
+      if (near) b.body.activate();
     }
   }
 
@@ -431,10 +459,9 @@ export class RoomSim {
           this.park(b);   // 8 on the break: spot it back once the table settles
           continue;
         }
-        pocketBall(this.world, this.balls, b);
         this.game.recordPocket(b.number);
         if (b.number != null) this.pocketedList.push(b.number);
-        removed.push(b.id);
+        this.sink(b);   // keep it resting in the cup (not deleted)
       } else {
         // Driven off the table → foul. Record it now, but park the ball frozen
         // where it is and only spot it back once EVERY ball has stopped moving
@@ -444,6 +471,34 @@ export class RoomSim {
       }
     }
     return removed;
+  }
+
+  // A pocketed ball keeps falling into its cup DURING the shot (so the client
+  // sees it drop in) and is removed only once the shot is over (see clearSunk in
+  // runShotAndRecord). Move it out of the in-play `balls` list (rules, AI and
+  // contact scanning ignore it) into `sunk`, and re-filter it into the pocket
+  // group: it collides with the cup (and other sunk balls) so it drops to the
+  // bottom, but NOT with the felt, the rails, or the in-play balls — a ball on
+  // its way into the pocket must not disturb the balls still in play or keep the
+  // rest check from settling. It stays dynamic (the re-add restores gravity) and
+  // keeps being streamed until removed.
+  sink(b) {
+    const i = this.balls.indexOf(b);
+    if (i >= 0) this.balls.splice(i, 1);
+    b.sunk = true;
+    setBodyFilter(this.world, b.body, CG_SUNK, MASK_SUNK);
+    this.sunk.push(b);
+    this.rebuildBallPtrMap();   // its ptr must no longer count as a live ball
+  }
+
+  // Remove every pocketed ball from the world once the shot has settled. Pushes a
+  // removal at the final frame so the client (which has watched them drop in)
+  // clears their meshes as the replay ends. Returns the removals to append.
+  clearSunk(frame) {
+    const out = this.sunk.map(b => ({ id: b.id, frame }));
+    for (const b of this.sunk) this.world.removeRigidBody(b.body);
+    this.sunk = [];
+    return out;
   }
 
   // Freeze a ball in place and flag it to be re-spotted at rest. Zeroing its
@@ -467,14 +522,23 @@ export class RoomSim {
     }
   }
 
+  // Rest = the IN-PLAY balls have stopped; this ends the replay and gates the
+  // next shot. Pocketed balls (this.sunk) are deliberately excluded: they can
+  // jitter indefinitely settling in a cup, and waiting on them would drag every
+  // shot to the time cap and block the next shot. They still fall dynamically
+  // during the replay (gravity is on), and since the live balls keep rolling for
+  // far longer than the ~0.3 s cup drop takes, the fall is captured in full.
   ballsAtRest() {
-    for (const b of this.balls) {
-      if (b.pendingSpot) continue;   // parked off-table balls are frozen; ignore
-      const v = b.body.getLinearVelocity();
-      if (Math.hypot(v.x(), v.y(), v.z()) > LIN_REST) return false;
-      const w = b.body.getAngularVelocity();
-      if (Math.hypot(w.x(), w.y(), w.z()) > ANG_REST) return false;
-    }
+    for (const b of this.balls) if (!this.ballRested(b)) return false;
+    return true;
+  }
+
+  ballRested(b) {
+    if (b.pendingSpot) return true;   // parked off-table balls are frozen; ignore
+    const v = b.body.getLinearVelocity();
+    if (Math.hypot(v.x(), v.y(), v.z()) > LIN_REST) return false;
+    const w = b.body.getAngularVelocity();
+    if (Math.hypot(w.x(), w.y(), w.z()) > ANG_REST) return false;
     return true;
   }
 

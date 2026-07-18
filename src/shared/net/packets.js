@@ -33,7 +33,11 @@ export const packetSchemas = {
   // `rot` entry only if it rotated — a resting ball costs nothing, a ball
   // spinning in place resends only its quaternion. The client expands back to
   // full frames (beginReplay) and replays smoothly with interpolation.
+  // `shot` carries the cue parameters the strike was taken with (final pitch
+  // after the elevation floor, and pullback = power) so the replay can render
+  // the cue stick drawing back and thrusting into the ball before the recording.
   shotAnim:     { dtMs: 'float32',
+                  shot: { yaw: 'float32', pitch: 'float32', strikeX: 'float32', strikeY: 'float32', pullback: 'float32' },
                   frames: [ { pos: [ { id: 'uint8', x: 'float32', y: 'float32', z: 'float32' } ],
                               rot: [ { id: 'uint8', qx: 'float32', qy: 'float32', qz: 'float32', qw: 'float32' } ] } ],
                   removals: [ { id: 'uint8', frame: 'uint16' } ] },

@@ -12,12 +12,12 @@ export const pocketPositions = pocket_positions(tableW, tableH);
 
 // --- Ball-capture geometry (server sim) -------------------------------------
 // A ball is pocketed once it drops below POCKET_Y_THRESHOLD with its centre
-// within CAPTURE_R of a pocket. OPEN_R (smaller) is the mouth over which a
-// ball's collision mask is switched so it can fall in instead of rolling across.
+// within CAPTURE_R of a pocket. The DROP itself is physical: near a pocket the
+// ball rolls on the triangulated felt (which has the real hole) and tips in —
+// see isNearPocket + createFeltMesh.
 export const POCKET_Y_THRESHOLD = -0.05;
-const CAPTURE_R = 0.10, OPEN_R = 0.07;
+const CAPTURE_R = 0.10;
 const CAPTURE_R_SQ = CAPTURE_R * CAPTURE_R;
-const OPEN_R_SQ = OPEN_R * OPEN_R;
 
 export function isInsideAnyPocket(x, z) {
   for (const [px, pz] of pocketPositions) {
@@ -26,10 +26,17 @@ export function isInsideAnyPocket(x, z) {
   }
   return false;
 }
-export function isOverPocketMouth(x, z) {
+
+// True when a ball is close enough to a pocket to swap from the flat felt plane
+// to the triangulated felt mesh (which has the real hole). NEAR_R must comfortably
+// exceed the mouth cutout's reach (~0.13 m at the corners) so the ball is already
+// on the mesh by the time it reaches the opening.
+const NEAR_R = 0.2;
+const NEAR_R_SQ = NEAR_R * NEAR_R;
+export function isNearPocket(x, z) {
   for (const [px, pz] of pocketPositions) {
     const dx = x - px, dz = z - pz;
-    if (dx * dx + dz * dz <= OPEN_R_SQ) return true;
+    if (dx * dx + dz * dz <= NEAR_R_SQ) return true;
   }
   return false;
 }

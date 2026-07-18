@@ -2,8 +2,36 @@
 // Ammo only, no Three. Each builder takes the target `world` so a room can
 // build its own table. Ported verbatim from the physics halves of the old
 // geometry.js (the mesh halves stay in geometry.js for the client).
-import { mu_wall, e_rail } from '../shared/constants.js';
+import { mu_wall, e_rail, mu_ground, e_table } from '../shared/constants.js';
 import { AmmoLib, createRigidBody } from './physics.js';
+import { triangulate } from '../shared/triangulate.js';
+
+// Static triangulated felt at height `y`, built from the displayed felt outline
+// `feltPts` ([[x,z],...]) so the pocket cutouts are REAL holes: a ball on this
+// surface rolls to a mouth and tips in over the actual edge (vs. the flat plane,
+// which the sim uses away from pockets). Returns the rigid body (caller filters
+// it into the felt-mesh collision group).
+export function createFeltMesh(world, feltPts, y = 0, opts = {}) {
+  const Ammo = AmmoLib;
+  const mu = opts.mu ?? mu_ground;
+  const e  = opts.e  ?? e_table;
+
+  const tris = triangulate(feltPts);
+  const mesh = new Ammo.btTriangleMesh();
+  const va = new Ammo.btVector3(), vb = new Ammo.btVector3(), vc = new Ammo.btVector3();
+  for (let i = 0; i < tris.length; i += 3) {
+    const a = feltPts[tris[i]], b = feltPts[tris[i + 1]], c = feltPts[tris[i + 2]];
+    va.setValue(a[0], y, a[1]); vb.setValue(b[0], y, b[1]); vc.setValue(c[0], y, c[1]);
+    mesh.addTriangle(va, vb, vc, true);
+  }
+  Ammo.destroy(va); Ammo.destroy(vb); Ammo.destroy(vc);
+
+  const shape = new Ammo.btBvhTriangleMeshShape(mesh, true, true);   // quantized AABB + build BVH
+  return createRigidBody(world, {
+    mass: 0, shape, pos: { x: 0, y: 0, z: 0 }, quat: { x: 0, y: 0, z: 0, w: 1 },
+    fric: mu, rest: e, rollF: 0, spinF: 0, linD: 0, angD: 0,
+  });
+}
 
 export function createPhysicsPolyline(world, pointsXZ, wireR, wireY, opts = {}) {
   const Ammo = AmmoLib;

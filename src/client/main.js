@@ -9,7 +9,8 @@ import {
   makePolylineMesh, makePlanarMeshFromPolyline, makeCylindricalCupMesh,
 } from './geometry.js';
 import {
-  initCueStick, updateCueAndCamera, placeCamera, setVisible as setCueVisible,
+  initCueStick, updateCueAndCamera, updateCueStick, placeCamera,
+  setVisible as setCueVisible, isVisible as isCueVisible,
   getStrikeOffset, setStrikeOffset, resetStrikeOffset, setViewMode,
   getYaw, setYaw, getPitch, setPitch, getPullback, setPullback, getMaxPullback,
   zoomCamera, initFreeCamFromCurrent,
@@ -17,10 +18,15 @@ import {
 import { bindInput } from './input.js';
 import {
   buildRack, applyBallsFrame, applyBallsFrameLerp, removeBallView, setCuePosition,
-  getCueMeshPosition, getObstaclePositions, clearRack,
+  getCueMeshPosition, getObstaclePositions, clearRack, ballIds,
 } from './balls.view.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
-import { renderHUD, renderPocketed } from './hud.js';
+import { renderHUD } from './hud.js';
+import { initHud, drawHud, clearHud } from './hudCanvas.js';
+import {
+  initReview, recordShot, resetReview, setReviewLayout, isReviewing, reviewTick,
+  reviewCueAnchor, openReviewPanel,
+} from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
 import {
   packetSchemas, PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER,
@@ -62,6 +68,7 @@ const placeRay = new THREE.Raycaster();
 const placeNdc = new THREE.Vector2();
 const placePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -R);   // y = R
 const placeHit = new THREE.Vector3();
+const _reviewAnchor = new THREE.Vector3();   // fixed aim-view anchor during replay
 function cursorToTable(clientX, clientY) {
   if (!stageCanvas || !camera) return null;
   const rect = stageCanvas.getBoundingClientRect();
@@ -74,6 +81,7 @@ let input = null;
 // V-key cycles the camera preference: 'aim' (down the stick) → 'free'
 // (fly-around) → 'top' (overhead). Resolved against game state each frame.
 let camPref = 'aim';
+let wasReviewing = false;   // to restore the win banner when review ends
 const railPoints = densify(rail_pts(tableW, tableH));   // sampled rail for cue-clearance
 
 const myTurn = () => gs.current === net.myIndex;
@@ -83,11 +91,15 @@ function buildScene() {
   if (sceneReady) return;
   const { canvas, scene } = initScene();
   stageCanvas = canvas;
+  initHud(document.getElementById('hudCanvas'));   // 2D overlay HUD (spin/power/view/pocketed)
+  initReview();                                    // collapsible past-shot video player
 
   const railPoints = rail_pts(tableW, tableH);
   const feltPoints = felt_pts(tableW, tableH);
   const pocketPositions = pocket_positions(tableW, tableH);
-  scene.add(makePlanarMeshFromPolyline(feltPoints, 0.2, -0.1, {}));
+  // Table slab, 1 inch (0.0254 m) thick; top stays at the felt level (y=0), so
+  // pass y = -thickness/2. (Purely visual — the physics felt is a plane at y=0.)
+  scene.add(makePlanarMeshFromPolyline(feltPoints, 0.0254, -0.0127, { felt: true }));
   scene.add(makePolylineMesh(railPoints, rodR, wireY, { color: 0xb8c2cc }));
   for (const [x, z] of pocketPositions) {
     scene.add(makeCylindricalCupMesh(0.075, 0.4, { pos: { x, y: -0.21, z } }));
@@ -95,8 +107,8 @@ function buildScene() {
   initCueStick();
 
   input = bindInput(canvas, {
-    isReady:  () => net.inGame && !replaying() && gs.interact === PH_AIMING && myTurn(),
-    isPlacing: () => net.inGame && !replaying() && gs.interact === PH_PLACING && myTurn(),
+    isReady:  () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_AIMING && myTurn(),
+    isPlacing: () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
     onToggleView: () => {                               // V: cycle aim → free → top
       camPref = camPref === 'aim' ? 'free' : camPref === 'free' ? 'top' : 'aim';
       // Snapshot the current view when entering free so it doesn't jump (read
@@ -156,7 +168,7 @@ $('btnJoin').addEventListener('click',   () => {
   if (code.length) socket.emit('joinRoom', { name: nameVal(), code });
 });
 $('btnLeaveLobby').addEventListener('click', () => { socket.emit('leaveRoom', {}); showMenu(); });
-$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); cancelReplay(); clearRack(); showMenu(); });
+$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); cancelReplay(); resetReview(); clearRack(); showMenu(); });
 $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game: 255 }));
 
 // ---- Shot replay --------------------------------------------------------------
@@ -190,9 +202,24 @@ function beginReplay(anim) {
       f.balls.push({ id, x: p.x, y: p.y, z: p.z, qx: r.qx, qy: r.qy, qz: r.qz, qw: r.qw });
     }
   }
+  // Reconcile against the authoritative start-of-shot set: frame 0 lists exactly
+  // the balls in play when the shot began (the server's live `balls`; pocketed
+  // ones were already cleared). Delete any rendered ball that isn't in it, so a
+  // pocketed ball's mesh can never linger into the next shot as a physics-less
+  // ghost. Skipped while reviewing — the review owns the meshes then and restores
+  // the live set on exit.
+  if (!isReviewing()) {
+    const live = new Set(anim.frames[0].balls.map(b => b.id));
+    for (const { id } of ballIds()) if (!live.has(id)) removeBallView(id);
+  }
+
   replay.anim = anim;
   replay.start = performance.now();
   replay.nextRemoval = 0;
+  // Post-shot gameState is deferred (afterReplay), so `gs` still names the
+  // shooter's turn here — grab their chip name for the review label.
+  const shooter = (gs.chips && gs.chips[gs.current] && gs.chips[gs.current].text) || `Player ${gs.current + 1}`;
+  recordShot(anim, shooter);   // stash the expanded shot for the review player
 }
 
 function tickReplay(now) {
@@ -248,6 +275,7 @@ socket.on('lobby', ({ state, players }) => {
 socket.on('startGame', ({ layout }) => {
   buildScene();
   cancelReplay();
+  setReviewLayout(layout);   // fix id→number for this rack; clears past-game shots
   buildRack(layout);
   const cue = layout.find(b => b.id === 0);
   if (cue) { localPlace.x = cue.x; localPlace.z = cue.z; }
@@ -258,9 +286,9 @@ socket.on('startGame', ({ layout }) => {
 socket.on('gameState', afterReplay((state) => {
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
   gs = state;
-  renderHUD(gs);
-  renderPocketed(gs.pocketed);
+  renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
   placeBotSlider();               // re-attach the difficulty slider to the bot chip
+  if (gs.winner >= 0) openReviewPanel();   // game over → surface the replay controls
 
   const turnKey = `${gs.interact}:${gs.current}`;
   // Reset my spin/charge/view at the start of my aiming turn.
@@ -291,44 +319,15 @@ socket.on('aimState', (a) => {
 
 socket.on('opponentLeft', () => {
   $('menuMsg').textContent = 'Opponent left the game.';
-  cancelReplay(); clearRack(); showMenu();
+  cancelReplay(); resetReview(); clearRack(); showMenu();
 });
 socket.on('disconnect', () => {
   $('menuMsg').textContent = 'Disconnected from server.';
-  cancelReplay(); clearRack(); showMenu();
+  cancelReplay(); resetReview(); clearRack(); showMenu();
 });
 
-// ---- Strike-point widget ----------------------------------------------------
-const strikeDot = $('strikeDot');
-const STRIKE_WIDGET_R = 36;
-function updateStrikeWidget() {
-  if (!strikeDot) return;
-  const { x, y } = getStrikeOffset();
-  strikeDot.style.transform = `translate(${x * STRIKE_WIDGET_R}px, ${-y * STRIKE_WIDGET_R}px)`;
-}
-
-// ---- Power bar ---------------------------------------------------------------
-// Sidebar bar showing the current pullback as a fraction of max. Driven from
-// the render loop like the strike widget; cue.js pullback is also fed by the
-// opponent's/bot's streamed aim, so the bar mirrors their draw-back too.
-const powerCover = $('powerCover');
-function updatePowerBar() {
-  if (!powerCover) return;
-  const p = Math.min(1, Math.max(0, getPullback() / getMaxPullback()));
-  powerCover.style.width = `${(1 - p) * 100}%`;
-}
-
-// Sidebar label of the current camera view. Driven from the render loop with
-// the resolved view ('aim'|'free'|'top'), so it reflects forced-overhead states
-// (placing/spectating/game-over) too, not just the V preference.
-const viewNameEl = $('viewName');
-const VIEW_LABELS = { aim: 'Aim (down cue)', free: 'Free fly-around', top: 'Overhead' };
-let lastViewName = '';
-function setViewName(view) {
-  if (!viewNameEl || view === lastViewName) return;
-  lastViewName = view;
-  viewNameEl.textContent = VIEW_LABELS[view] || view;
-}
+// The spin dial, power meter, camera-view label and pocketed balls are drawn on
+// the HUD overlay canvas (hudCanvas.js) from the render loop — see drawHud below.
 
 // ---- Aim streaming (so the opponent sees my cue) ----------------------------
 let lastAimSent = 0;
@@ -344,8 +343,38 @@ function loop(now) {
   requestAnimationFrame(loop);
   if (!sceneReady) return;
   if (input) input.tick();
-  updateStrikeWidget();
-  updatePowerBar();
+
+  // Reviewing a past shot takes over the table locally: drive the review
+  // playhead and skip all live logic. All three cameras stay available (V
+  // cycles aim → free → overhead). The review player shows the cue stick
+  // drawing back and striking at the start of each shot (it toggles the cue
+  // visibility + aim state itself); here we just render it at the cue ball.
+  if (isReviewing()) {
+    reviewTick(now);
+    const view = camPref;   // 'aim' | 'free' | 'top'
+    setViewMode(view);
+    const cuePos = getCueMeshPosition();
+    const anchor = reviewCueAnchor();
+    if (view === 'aim' && anchor) {
+      // Aim view stays fixed at the cue's START, sighting down the shot line —
+      // it does NOT follow the cue ball as the shot plays out.
+      _reviewAnchor.set(anchor.x, anchor.y, anchor.z);
+      updateCueAndCamera(_reviewAnchor);
+    } else {
+      if (cuePos && isCueVisible()) updateCueStick(cuePos);      // stick only
+      placeCamera();
+    }
+    clearHud();
+    $('banner').classList.remove('show');   // don't let the win banner cover the replay
+    render();
+    wasReviewing = true;
+    return;
+  }
+  if (wasReviewing) {   // just exited review — restore the win banner if the game's over
+    wasReviewing = false;
+    $('banner').classList.toggle('show', gs.winner >= 0);
+  }
+
   tickReplay(now);
 
   if (net.inGame) {
@@ -378,11 +407,23 @@ function loop(now) {
     const forcedTop = interact === PH_PLACING || interact === PH_OVER || !myTurn();
     const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
     setViewMode(view);
-    setViewName(view);
     setCueVisible(interact === PH_AIMING);
 
     if (cuePos && interact === PH_AIMING) updateCueAndCamera(cuePos);
     else placeCamera();
+
+    // HUD overlay: spin dial, power meter, camera view, pocketed balls. cue.js
+    // state also carries the opponent's/bot's streamed aim while spectating, so
+    // the dial + meter mirror their draw-back too.
+    const s = getStrikeOffset();
+    drawHud({
+      strikeX: s.x, strikeY: s.y,
+      power: getPullback() / getMaxPullback(),
+      view,
+      pocketed: gs.pocketed || [],
+    });
+  } else {
+    clearHud();
   }
 
   render();
@@ -392,6 +433,7 @@ function loop(now) {
 window.__errors = [];
 window.addEventListener('error', e => window.__errors.push(String(e.message || e.error)));
 window.__net = { socket, state: () => gs, me: () => net };
+window.__ballIds = ballIds;   // debug: client-side rendered ball set (ghost detection)
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');

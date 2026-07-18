@@ -94,6 +94,34 @@ export function buildRack(layout) {
   }
 }
 
+// Full transform snapshot of every current ball (id + number + exact pose),
+// enough to rebuild the identical rack later. Used by the shot-review player to
+// stash the live table before it borrows the meshes, and to restore it after.
+export function snapshotRack() {
+  const out = [];
+  for (const [id, v] of views) {
+    const p = v.mesh.position, q = v.mesh.quaternion;
+    out.push({ id, number: v.number, x: p.x, y: p.y, z: p.z, qx: q.x, qy: q.y, qz: q.z, qw: q.w });
+  }
+  return out;
+}
+
+// Rebuild the rack from a snapshotRack()-style list, honouring each ball's full
+// pose (not the racked default buildRack applies). `number` is the raw number or
+// null for the cue.
+export function rebuildFromSnapshot(list) {
+  clearRack();
+  for (const spec of list) {
+    const number = spec.number;
+    const style = ballStyle(number);
+    const color = number != null ? BALL_COLORS[number] : "#ffffff";
+    const mesh = makeBallMesh({ style, color, number });
+    mesh.position.set(spec.x, spec.y, spec.z);
+    mesh.quaternion.set(spec.qx, spec.qy, spec.qz, spec.qw);
+    views.set(spec.id, { mesh, number, style });
+  }
+}
+
 export function clearRack() {
   for (const { mesh } of views.values()) {
     scene.remove(mesh);
@@ -156,11 +184,18 @@ export function getCueMeshPosition() {
   return v ? v.mesh.position : null;
 }
 
+// Every ball currently rendered (id, number, y) — for ghost detection in tests.
+export function ballIds() {
+  return [...views.entries()].map(([id, v]) => ({ id, number: v.number, y: +v.mesh.position.y.toFixed(3) }));
+}
+
 // XZ positions of every ball except the cue (id 0) — used for cue-clearance.
+// Balls resting in a pocket sit below the felt (y < 0); skip them so they don't
+// count as obstacles behind the cue ball (the server ignores them too).
 export function getObstaclePositions() {
   const out = [];
   for (const [id, v] of views) {
-    if (id === 0) continue;
+    if (id === 0 || v.mesh.position.y < 0) continue;
     out.push({ x: v.mesh.position.x, z: v.mesh.position.z });
   }
   return out;
