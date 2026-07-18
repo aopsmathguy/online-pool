@@ -184,16 +184,23 @@ function drawPowerStick(power) {
 
 // Right side: one slot per object ball 1..15 in numerical order, stacked
 // top-down. A potted ball shows the real ball; a ball still in play shows an
-// empty circle — so the column is always 15 slots, some balls, some holes.
+// empty circle — always 15 slots. If a single column would run down into the
+// bottom-right controls, it wraps into extra columns growing leftward.
+const POCKET_BOTTOM_RESERVE = 155;   // keep clear of the bottom-right zoom / free-cam buttons
 function drawPocketed(w, h, pocketed) {
   const potted = new Set(pocketed || []);
-  const r = 13, gap = 6;
-  const x = w - MARGIN - r;
-  let y = MARGIN + r;
+  const r = 13, gap = 6, step = 2 * r + gap;
+  const top = MARGIN + r;
+  const usable = h - top - r - POCKET_BOTTOM_RESERVE;   // vertical room for slot centres
+  const maxRows = Math.min(15, Math.max(1, Math.floor(usable / step) + 1));
   for (let n = 1; n <= 15; n++) {
+    const i = n - 1;
+    const col = Math.floor(i / maxRows);   // 0 = rightmost column
+    const row = i % maxRows;
+    const x = w - MARGIN - r - col * step;
+    const y = top + row * step;
     if (potted.has(n)) drawBall(x, y, r, n);
     else drawEmptySlot(x, y, r);
-    y += 2 * r + gap;
   }
 }
 

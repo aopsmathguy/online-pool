@@ -13,7 +13,7 @@ import {
   setVisible as setCueVisible, isVisible as isCueVisible,
   getStrikeOffset, setStrikeOffset, resetStrikeOffset, setViewMode,
   getYaw, setYaw, getPitch, setPitch, getPullback, setPullback, getMaxPullback,
-  zoomCamera, initFreeCamFromCurrent,
+  zoomCamera, initFreeCamFromCurrent, resetTopPan,
 } from './cue.js';
 import { bindInput } from './input.js';
 import {
@@ -69,6 +69,7 @@ const placeNdc = new THREE.Vector2();
 const placePlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -R);   // y = R
 const placeHit = new THREE.Vector3();
 const _reviewAnchor = new THREE.Vector3();   // fixed aim-view anchor during replay
+const _placeVec = new THREE.Vector3();       // projects the cue ball to screen for the ✓ button
 function cursorToTable(clientX, clientY) {
   if (!stageCanvas || !camera) return null;
   const rect = stageCanvas.getBoundingClientRect();
@@ -76,6 +77,19 @@ function cursorToTable(clientX, clientY) {
   placeNdc.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   placeRay.setFromCamera(placeNdc, camera);
   return placeRay.ray.intersectPlane(placePlane, placeHit) ? placeHit : null;
+}
+// True if the pointer is over (near) the cue ball on the felt — used so ball-in-
+// hand can tell "drag the ball" from "pan the table". Generous grab radius (5R)
+// so it's easy to grab, on mouse and touch.
+function isOverCueBall(clientX, clientY) {
+  const p = cursorToTable(clientX, clientY);
+  const cue = getCueMeshPosition();   // the ball's actual (server-clamped) spot
+  if (!p || !cue) return false;
+  const dx = p.x - cue.x, dz = p.z - cue.z;
+  return dx * dx + dz * dz <= (5 * R) * (5 * R);
+}
+function confirmPlace() {
+  if (gs.interact === PH_PLACING && myTurn()) socket.emit('placeConfirm', {});
 }
 let input = null;
 // V-key cycles the camera preference: 'aim' (down the stick) → 'free'
@@ -111,6 +125,7 @@ function buildScene() {
     isPlacing: () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
     onToggleView: cycleView,                            // V: cycle aim → free → top
     onZoom: (deltaY) => zoomCamera(deltaY),            // scroll: dolly the camera
+    isOverCueBall,
     onPlaceMove: (clientX, clientY) => {
       if (!(gs.interact === PH_PLACING && myTurn())) return;
       const p = cursorToTable(clientX, clientY);   // where the cursor points on the felt
@@ -118,7 +133,6 @@ function buildScene() {
       localPlace.x = p.x; localPlace.z = p.z;       // server clamps to the legal region
       socket.emit('placeMove', { x: localPlace.x, z: localPlace.z });
     },
-    onPlaceConfirm: () => { if (gs.interact === PH_PLACING && myTurn()) socket.emit('placeConfirm', {}); },
     onShoot: (pull) => {
       if (!(gs.interact === PH_AIMING && myTurn())) return;
       const s = getStrikeOffset();
@@ -270,6 +284,7 @@ socket.on('lobby', ({ state, players }) => {
 socket.on('startGame', ({ layout }) => {
   buildScene();
   cancelReplay();
+  resetTopPan();             // recenter overhead for the new game
   setReviewLayout(layout);   // fix id→number for this rack; clears past-game shots
   buildRack(layout);
   const cue = layout.find(b => b.id === 0);
@@ -338,6 +353,8 @@ function maybeSendAim(now) {
 function cycleView() {
   camPref = camPref === 'aim' ? 'free' : camPref === 'free' ? 'top' : 'aim';
   if (camPref === 'free') initFreeCamFromCurrent();
+  // Overhead pan/zoom persist across view switches (recentred only on new game),
+  // so returning to bird's-eye restores your last overhead framing.
 }
 $('viewBtn').addEventListener('click', cycleView);
 
@@ -356,6 +373,21 @@ function hideInGameControls() {
   $('zoomControls').classList.add('hidden');
   $('freeControls').classList.add('hidden');
 }
+// Show the ✓ button next to the cue ball while I'm placing it (ball-in-hand),
+// tracking the ball's projected screen position; hidden otherwise.
+function updatePlaceButton() {
+  const btn = $('placeConfirm');
+  const show = net.inGame && !isReviewing() && !replaying() && gs.interact === PH_PLACING && myTurn();
+  btn.classList.toggle('hidden', !show);
+  if (!show || !stageCanvas) return;
+  const cue = getCueMeshPosition();   // track the ball where it actually rests (legal spot)
+  if (!cue) return;
+  const rect = stageCanvas.getBoundingClientRect();
+  _placeVec.set(cue.x, cue.y, cue.z).project(camera);
+  btn.style.left = `${(_placeVec.x * 0.5 + 0.5) * rect.width + 26}px`;
+  btn.style.top = `${(-_placeVec.y * 0.5 + 0.5) * rect.height}px`;
+}
+$('placeConfirm').addEventListener('click', confirmPlace);
 // Pocketed numbers to display now: the confirmed baseline plus any ball that has
 // visibly dropped into a pocket this instant (so the column updates the moment a
 // ball sinks, live or in a replay — before the shot fully resolves).
@@ -368,6 +400,7 @@ function loop(now) {
   requestAnimationFrame(loop);
   if (!sceneReady) return;
   if (input) input.tick();
+  updatePlaceButton();   // ✓ button follows the cue ball during ball-in-hand
 
   // Reviewing a past shot takes over the table locally: drive the review
   // playhead and skip all live logic. All three cameras stay available (V
@@ -481,6 +514,13 @@ socket.on('connect', () => {
   else if (params.has('quick')) socket.emit('quickPlay', { name: nameVal(), game: gameVal() });
   else if (params.has('bot')) { net.bot = true; socket.emit('playBot', { name: nameVal(), game: gameVal(), skill: botSkillVal() }); }
 });
+
+// Suppress mobile browser gestures that fight the game: iOS pinch-zoom and
+// double-tap / double-click zoom. (touch-action + user-scalable=no cover the
+// rest; taps and clicks are unaffected.)
+['gesturestart', 'gesturechange', 'gestureend'].forEach(t =>
+  document.addEventListener(t, e => e.preventDefault(), { passive: false }));
+document.addEventListener('dblclick', e => e.preventDefault());
 
 showMenu();
 requestAnimationFrame(loop);

@@ -1,15 +1,17 @@
 // src/scene.js
 import * as THREE from "/lib/three.module.js";
-import { tableW } from '../shared/constants.js';
+import { tableW, tableH } from '../shared/constants.js';
 
 let renderer, scene, camera, perspCamera, orthoCamera;
 let DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
 const canvas = document.getElementById('stage');
 
-// Half-height (world metres, screen-vertical) of the orthographic top view at
-// zoom 1 — chosen to match the perspective camera's footprint on the table
-// plane at the default overhead height (2.15 m, fov 60: 2.15·tan 30°).
-const ORTHO_HALF_H = 1.2414;
+// Full half-extents of the table INCLUDING the pockets + rail lip, plus a little
+// margin. The overhead (orthographic) view is sized to contain this at zoom 1, so
+// the whole table always fits on screen whatever the aspect ratio (esp. portrait
+// mobile). In the top view screen-X ↔ world-X (long axis), screen-Y ↔ world-Z.
+const TABLE_HALF_X = tableW / 2 + 0.15;   // ≈ 1.27
+const TABLE_HALF_Z = tableH / 2 + 0.18;   // ≈ 0.74
 
 export function initScene() {
   scene = new THREE.Scene();
@@ -66,10 +68,14 @@ export function fitCanvas() {
     perspCamera.updateProjectionMatrix();
   }
   if (orthoCamera) {
-    orthoCamera.left = -ORTHO_HALF_H * aspect;
-    orthoCamera.right = ORTHO_HALF_H * aspect;
-    orthoCamera.top = ORTHO_HALF_H;
-    orthoCamera.bottom = -ORTHO_HALF_H;
+    // Contain-fit: vertical half-height must cover world-Z (table short axis) AND
+    // world-X (long axis) once divided by the aspect — whichever is larger wins,
+    // so nothing is ever cropped, from wide desktop to portrait phone.
+    const halfH = Math.max(TABLE_HALF_Z, TABLE_HALF_X / aspect);
+    orthoCamera.left = -halfH * aspect;
+    orthoCamera.right = halfH * aspect;
+    orthoCamera.top = halfH;
+    orthoCamera.bottom = -halfH;
     orthoCamera.updateProjectionMatrix();
   }
 }

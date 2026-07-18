@@ -9,7 +9,7 @@
 //   - Ball-in-hand: drag to position the cue ball, release to place it.
 import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
-         getViewMode, freeLookMouse, freeMove, zoomStep } from './cue.js';
+         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop } from './cue.js';
 import { powerBarRect, spinDialRect } from './hudCanvas.js';
 
 const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
@@ -22,15 +22,16 @@ export function bindInput(canvas, handlers) {
     onShoot,
     isReady = () => true,
     isPlacing = () => false,
+    isOverCueBall = () => false,
     onPlaceMove = () => {},
-    onPlaceConfirm = () => {},
     onToggleView = () => {},
     onZoom = () => {},
   } = handlers;
 
-  let drag = null;      // null | 'aim' | 'spin' | 'look' | 'power' | 'place'
+  let drag = null;      // null | 'aim' | 'spin' | 'look' | 'power' | 'place' | 'pan'
   let dragId = null;    // pointerId of the active drag
   let lastX = 0, lastY = 0;
+  let powerGrabY = 0, powerGrabVal = 0;   // power drag is RELATIVE to the grab point
   let lastTime = performance.now();
   // Held movement keys / buttons for the free-fly camera.
   const moveKeys = { w: false, a: false, s: false, d: false, up: false, down: false };
@@ -51,12 +52,14 @@ export function bindInput(canvas, handlers) {
     return !!b && p.x >= b.x - POWER_PAD && p.x <= b.x + b.w + POWER_PAD
               && p.y >= b.yTop - POWER_PAD && p.y <= b.yTop + b.h + POWER_PAD;
   }
-  function powerFromY(y) {
+  // Power is a RELATIVE drag-back: the tip stays where it was when grabbed and
+  // moves with the drag (down = more power), rather than jumping to the pointer.
+  function updatePowerDrag(clientY) {
     const b = powerBarRect();
-    if (!b) return 0;
-    return Math.max(0, Math.min(1, (y - b.yTop) / b.h));
+    if (!b) return;
+    const v = powerGrabVal + (clientY - powerGrabY) / b.h;
+    setPullback(Math.max(0, Math.min(1, v)) * getMaxPullback());
   }
-  const setPowerFrom = (y) => setPullback(powerFromY(y) * getMaxPullback());
   function overSpinDial(p) {
     const d = spinDialRect();
     return !!d && Math.hypot(p.x - d.cx, p.y - d.cy) <= d.r + SPIN_PAD;
@@ -87,11 +90,18 @@ export function bindInput(canvas, handlers) {
     const p = local(e.clientX, e.clientY);
     lastX = e.clientX; lastY = e.clientY;
     let mode = null;
-    if (isReady() && overPowerBar(p)) { mode = 'power'; setPowerFrom(p.y); }
+    if (isReady() && overPowerBar(p)) { mode = 'power'; powerGrabY = e.clientY; powerGrabVal = getPullback() / getMaxPullback(); }
     else if (isReady() && overSpinDial(p)) { mode = 'spin'; setSpinFrom(p); }
-    else if (isPlacing()) { mode = 'place'; onPlaceMove(e.clientX, e.clientY); }
+    else if (isPlacing()) {
+      // Ball-in-hand: grab the cue ball to drag it, or drag anything else to move
+      // the camera — look-around in free view, pan in overhead. Placement is
+      // finalised only with the on-screen ✓ button, not on release.
+      if (isOverCueBall(e.clientX, e.clientY)) { mode = 'place'; onPlaceMove(e.clientX, e.clientY); }
+      else mode = getViewMode() === 'free' ? 'look' : 'pan';
+    }
     else if (getViewMode() === 'free') mode = 'look';
     else if (getViewMode() === 'aim') mode = 'aim';
+    else if (getViewMode() === 'top') mode = 'pan';   // overhead: drag to pan the table
     if (!mode) return;
     drag = mode; dragId = e.pointerId;
     try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -104,15 +114,14 @@ export function bindInput(canvas, handlers) {
       const p = local(e.clientX, e.clientY);
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       lastX = e.clientX; lastY = e.clientY;
-      if (drag === 'power') return setPowerFrom(p.y);
+      if (drag === 'power') return updatePowerDrag(e.clientY);
       if (drag === 'spin')  return setSpinFrom(p);
       if (drag === 'place') return onPlaceMove(e.clientX, e.clientY);
       if (drag === 'aim')   { addYaw(dx * MOUSE_SENS_X); addPitch(-dy * MOUSE_SENS_Y); return; }
       if (drag === 'look')  { freeLookMouse(dx, dy); return; }
+      if (drag === 'pan')   { dragPanTop(dx, dy, canvas.getBoundingClientRect().height); return; }
       return;
     }
-    // Mouse hover positions the cue ball while placing (no touch hover).
-    if (!drag && isPlacing() && e.pointerType === 'mouse') onPlaceMove(e.clientX, e.clientY);
   });
 
   function endDrag(e) {
@@ -123,9 +132,8 @@ export function bindInput(canvas, handlers) {
       const pull = getPullback();
       setPullback(0);
       if (pull > 0.001) onShoot(pull);
-    } else if (mode === 'place') {
-      onPlaceConfirm();
     }
+    // 'place' just drops the drag — placement is finalised by the ✓ button.
   }
   window.addEventListener('pointerup', endDrag);
   window.addEventListener('pointercancel', endDrag);

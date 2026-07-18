@@ -73,6 +73,18 @@ export function zoomStep(inDir) {
     camDistTarget = clamp(camDistTarget - inDir * CAM_DIST_STEP, CAM_DIST_MIN, CAM_DIST_MAX);
   }
 }
+
+// Overhead view: pan by dragging (the world point under the cursor stays under
+// it, so dragging down moves the table down on screen). dxPx/dyPx are pixel
+// deltas since the last move; viewHpx is the canvas height in CSS pixels.
+let topPanX = 0, topPanZ = 0;
+export function dragPanTop(dxPx, dyPx, viewHpx) {
+  if (!camera.isOrthographicCamera || !viewHpx) return;
+  const wpp = (camera.top - camera.bottom) / camera.zoom / viewHpx;   // world metres per pixel
+  topPanX -= dxPx * wpp;
+  topPanZ -= dyPx * wpp;
+}
+export function resetTopPan() { topPanX = 0; topPanZ = 0; }
 // The overhead view renders through the orthographic camera (true plan view);
 // everything else uses the perspective one. scene.js swaps the active camera.
 export function setViewMode(v) {
@@ -301,9 +313,9 @@ export function placeCamera() {
   // otherwise the very first (break) placement, before any shot has set the
   // anchor, would fall through to the default camera instead of top view.
   if (viewMode === 'top') {
-    camera.position.set(0, topHeight, 0);
+    camera.position.set(topPanX, topHeight, topPanZ);
     camera.up.set(0, 0, -1);
-    camera.lookAt(0, 0, 0);
+    camera.lookAt(topPanX, 0, topPanZ);
     // Orthographic size ignores camera height, so map the scroll-driven
     // height onto ortho zoom instead: default height = zoom 1, scrolling
     // closer zooms in. Keeps the same scroll limits and easing.

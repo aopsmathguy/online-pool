@@ -4,7 +4,8 @@
 * { -webkit-user-select:none; -moz-user-select:none; user-select:none;
     -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
 input, textarea { -webkit-user-select:text; user-select:text; }
-html, body { margin:0; height:100%; overflow:hidden; background:#0b1020; color:#e7eef7; font-family:sans-serif; }
+html, body { margin:0; height:100%; overflow:hidden; background:#0b1020; color:#e7eef7; font-family:sans-serif;
+  touch-action:manipulation; overscroll-behavior:none; }
 .wrap { height:100%; }
 .stageWrap { position:relative; overflow:hidden; height:100%; }
 #stage { width:100%; height:100%; display:block; background:#073b18; cursor:crosshair; touch-action:none; }
@@ -106,6 +107,14 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
   background:rgba(22,32,74,0.9); border:1px solid #2a3566; border-radius:12px;
   cursor:pointer; touch-action:none; -webkit-touch-callout:none; user-select:none; }
 .viewBtn:hover { background:#1c2a5e; }
+
+/* Ball-in-hand ✓ button — floats next to the cue ball (positioned in main.js). */
+.placeConfirm { position:absolute; z-index:6; transform:translateY(-50%);
+  width:46px; height:46px; font-size:24px; line-height:1; padding:0;
+  background:#1c7c3a; border:1px solid #3ddc74; border-radius:50%; color:#fff; cursor:pointer;
+  box-shadow:0 4px 14px rgba(0,0,0,0.5); touch-action:none; -webkit-touch-callout:none; user-select:none; }
+.placeConfirm:hover { background:#249a48; }
+.placeConfirm:active { background:#2ecc71; }
 
 /* Bottom-right clusters: zoom (aim/overhead) or free-cam movement pad. */
 .ctrlCluster { position:absolute; right:16px; bottom:20px; z-index:6;
