@@ -1,4 +1,9 @@
 /* styles.css */
+/* No text selection or long-press callout anywhere (mobile-friendly), and no tap
+   highlight flash on buttons. Text inputs stay selectable/editable. */
+* { -webkit-user-select:none; -moz-user-select:none; user-select:none;
+    -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent; }
+input, textarea { -webkit-user-select:text; user-select:text; }
 html, body { margin:0; height:100%; overflow:hidden; background:#0b1020; color:#e7eef7; font-family:sans-serif; }
 .wrap { height:100%; }
 .stageWrap { position:relative; overflow:hidden; height:100%; }
