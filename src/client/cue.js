@@ -85,6 +85,27 @@ export function dragPanTop(dxPx, dyPx, viewHpx) {
   topPanZ -= dyPx * wpp;
 }
 export function resetTopPan() { topPanX = 0; topPanZ = 0; }
+
+// Overhead pinch-zoom (two fingers). Zooms about the pinch midpoint so the world
+// point under the fingers stays put — which adjusts BOTH the camera height (from
+// the pinch scale) and the pan offset (from the midpoint). Applied immediately
+// (no easing) so it tracks the fingers. All args in canvas CSS pixels.
+export function pinchTop(midX, midY, prevMidX, prevMidY, dist, prevDist, viewW, viewH) {
+  if (!camera.isOrthographicCamera || !prevDist || !dist || !viewH) return;
+  const frustumH = camera.top - camera.bottom;      // world height spanned at zoom 1
+  const cx = viewW / 2, cy = viewH / 2;
+  const wppOld = frustumH / camera.zoom / viewH;     // world metres per pixel (as shown)
+  // World point under the previous pinch midpoint (screen-X→+X, screen-Y→+Z).
+  const wx = topPanX + (prevMidX - cx) * wppOld;
+  const wz = topPanZ + (prevMidY - cy) * wppOld;
+  // Height from the pinch scale: fingers apart (scale > 1) → lower camera → zoom in.
+  const newHeight = clamp(topHeight / (dist / prevDist), TOP_H_MIN, TOP_H_MAX);
+  topHeight = newHeight; topHeightTarget = newHeight;
+  const wppNew = frustumH / (TOP_CAM_HEIGHT / newHeight) / viewH;
+  // Pan so that same world point sits under the new midpoint.
+  topPanX = wx - (midX - cx) * wppNew;
+  topPanZ = wz - (midY - cy) * wppNew;
+}
 // The overhead view renders through the orthographic camera (true plan view);
 // everything else uses the perspective one. scene.js swaps the active camera.
 export function setViewMode(v) {

@@ -9,7 +9,7 @@
 //   - Ball-in-hand: drag to position the cue ball, release to place it.
 import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
-         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop } from './cue.js';
+         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop } from './cue.js';
 import { powerBarRect, spinDialRect } from './hudCanvas.js';
 
 const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
@@ -32,7 +32,17 @@ export function bindInput(canvas, handlers) {
   let dragId = null;    // pointerId of the active drag
   let lastX = 0, lastY = 0;
   let powerGrabY = 0, powerGrabVal = 0;   // power drag is RELATIVE to the grab point
+  const pointers = new Map();   // active canvas pointers: id -> {x, y} (client px)
+  let pinch = null;             // { dist, midX, midY } (canvas px) while pinch-zooming overhead
   let lastTime = performance.now();
+
+  // Pinch state from the two active pointers, in canvas-local CSS pixels.
+  function pinchInfo(rect) {
+    const [a, b] = [...pointers.values()];
+    const ax = a.x - rect.left, ay = a.y - rect.top;
+    const bx = b.x - rect.left, by = b.y - rect.top;
+    return { dist: Math.hypot(bx - ax, by - ay), midX: (ax + bx) / 2, midY: (ay + by) / 2 };
+  }
   // Held movement keys / buttons for the free-fly camera.
   const moveKeys = { w: false, a: false, s: false, d: false, up: false, down: false };
   const moveKeyFor = (e) => {
@@ -86,7 +96,17 @@ export function bindInput(canvas, handlers) {
 
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (drag) return;   // already dragging — ignore extra touches
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    // Two fingers in overhead → pinch to zoom + pan (about the pinch midpoint).
+    if (pointers.size === 2 && getViewMode() === 'top') {
+      if (drag === 'power') setPullback(0);
+      drag = null; dragId = null;
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+      pinch = pinchInfo(canvas.getBoundingClientRect());
+      e.preventDefault();
+      return;
+    }
+    if (pointers.size !== 1 || drag) return;   // only the first finger starts a drag
     const p = local(e.clientX, e.clientY);
     lastX = e.clientX; lastY = e.clientY;
     let mode = null;
@@ -110,6 +130,14 @@ export function bindInput(canvas, handlers) {
 
   // Deltas from the previous position (works for touch, unlike movementX/Y).
   window.addEventListener('pointermove', e => {
+    if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pointers.size >= 2) {
+      const rect = canvas.getBoundingClientRect();
+      const info = pinchInfo(rect);
+      pinchTop(info.midX, info.midY, pinch.midX, pinch.midY, info.dist, pinch.dist, rect.width, rect.height);
+      pinch = info;
+      return;
+    }
     if (drag && e.pointerId === dragId) {
       const p = local(e.clientX, e.clientY);
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
@@ -135,8 +163,23 @@ export function bindInput(canvas, handlers) {
     }
     // 'place' just drops the drag — placement is finalised by the ✓ button.
   }
-  window.addEventListener('pointerup', endDrag);
-  window.addEventListener('pointercancel', endDrag);
+  function onPointerUp(e) {
+    pointers.delete(e.pointerId);
+    if (pinch) {
+      if (pointers.size < 2) {
+        pinch = null;
+        // One finger still down in overhead → hand off to a pan drag (no jump).
+        if (pointers.size === 1 && getViewMode() === 'top') {
+          const [remId, rem] = [...pointers.entries()][0];
+          drag = 'pan'; dragId = remId; lastX = rem.x; lastY = rem.y;
+        }
+      }
+      return;
+    }
+    endDrag(e);
+  }
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
 
   document.addEventListener('keydown', e => {
     const t = e.target;
@@ -178,6 +221,7 @@ export function bindInput(canvas, handlers) {
     stopZoom();
     if (drag === 'power') setPullback(0);
     drag = null; dragId = null;
+    pointers.clear(); pinch = null;
   });
 
   function tick() {

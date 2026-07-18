@@ -193,11 +193,14 @@ function drawPocketed(w, h, pocketed) {
   const top = MARGIN + r;
   const usable = h - top - r - POCKET_BOTTOM_RESERVE;   // vertical room for slot centres
   const maxRows = Math.min(15, Math.max(1, Math.floor(usable / step) + 1));
+  const cols = Math.ceil(15 / maxRows);
   for (let n = 1; n <= 15; n++) {
     const i = n - 1;
-    const col = Math.floor(i / maxRows);   // 0 = rightmost column
+    const col = Math.floor(i / maxRows);
     const row = i % maxRows;
-    const x = w - MARGIN - r - col * step;
+    // Columns read left → right in order: the first (lowest-numbered) column is
+    // leftmost; the last column is anchored to the right edge.
+    const x = w - MARGIN - r - (cols - 1 - col) * step;
     const y = top + row * step;
     if (potted.has(n)) drawBall(x, y, r, n);
     else drawEmptySlot(x, y, r);
