@@ -96,6 +96,7 @@ let input = null;
 // (fly-around) → 'top' (overhead). Resolved against game state each frame.
 let camPref = 'aim';
 let wasReviewing = false;   // to restore the win banner when review ends
+let ballCount = 15;         // object balls in play (15 for 8-ball, 9 for 9-ball)
 const railPoints = densify(rail_pts(tableW, tableH));   // sampled rail for cue-clearance
 
 const myTurn = () => gs.current === net.myIndex;
@@ -285,6 +286,8 @@ socket.on('startGame', ({ layout }) => {
   buildScene();
   cancelReplay();
   resetTopPan();             // recenter overhead for the new game
+  // Highest object-ball number = pocketed-column length (15 for 8-ball, 9 for 9-ball).
+  ballCount = layout.reduce((m, b) => (b.number !== 255 && b.number > m ? b.number : m), 0) || 15;
   setReviewLayout(layout);   // fix id→number for this rack; clears past-game shots
   buildRack(layout);
   const cue = layout.find(b => b.id === 0);
@@ -427,7 +430,7 @@ function loop(now) {
     const s = getStrikeOffset();
     drawHud({
       strikeX: s.x, strikeY: s.y, power: getPullback() / getMaxPullback(),
-      view, pocketed: pocketedNow(reviewPocketedBaseline()),
+      view, pocketed: pocketedNow(reviewPocketedBaseline()), ballCount,
     });
     updateViewUi(view);
     $('banner').classList.remove('show');   // don't let the win banner cover the replay
@@ -486,6 +489,7 @@ function loop(now) {
       power: getPullback() / getMaxPullback(),
       view,
       pocketed: pocketedNow(gs.pocketed),
+      ballCount,
     });
     updateViewUi(view);
   } else {

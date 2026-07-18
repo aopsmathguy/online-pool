@@ -36,7 +36,7 @@ const DOT_R = 8;        // strike-point marker
 // state: { strikeX, strikeY (each -1..1), power (0..1), view, pocketed:[numbers] }
 export function drawHud(state = {}) {
   if (!ctx) return;
-  const { strikeX = 0, strikeY = 0, power = 0, view = 'aim', pocketed = [] } = state;
+  const { strikeX = 0, strikeY = 0, power = 0, view = 'aim', pocketed = [], ballCount = 15 } = state;
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.save();
   ctx.scale(dpr, dpr);
@@ -44,7 +44,7 @@ export function drawHud(state = {}) {
 
   drawSpinDial(w, h, strikeX, strikeY, view);
   drawPowerStick(power);
-  drawPocketed(w, h, pocketed);
+  drawPocketed(w, h, pocketed, ballCount);
 
   ctx.restore();
 }
@@ -182,19 +182,19 @@ function drawPowerStick(power) {
   }
 }
 
-// Right side: one slot per object ball 1..15 in numerical order, stacked
-// top-down. A potted ball shows the real ball; a ball still in play shows an
-// empty circle — always 15 slots. If a single column would run down into the
-// bottom-right controls, it wraps into extra columns growing leftward.
+// Right side: one slot per object ball 1..count in numerical order, stacked
+// top-down (15 for 8-ball, 9 for 9-ball). A potted ball shows the real ball; a
+// ball still in play shows an empty circle. If a single column would run down
+// into the bottom-right controls, it wraps into extra columns growing leftward.
 const POCKET_BOTTOM_RESERVE = 155;   // keep clear of the bottom-right zoom / free-cam buttons
-function drawPocketed(w, h, pocketed) {
+function drawPocketed(w, h, pocketed, count = 15) {
   const potted = new Set(pocketed || []);
   const r = 13, gap = 6, step = 2 * r + gap;
   const top = MARGIN + r;
   const usable = h - top - r - POCKET_BOTTOM_RESERVE;   // vertical room for slot centres
-  const maxRows = Math.min(15, Math.max(1, Math.floor(usable / step) + 1));
-  const cols = Math.ceil(15 / maxRows);
-  for (let n = 1; n <= 15; n++) {
+  const maxRows = Math.min(count, Math.max(1, Math.floor(usable / step) + 1));
+  const cols = Math.ceil(count / maxRows);
+  for (let n = 1; n <= count; n++) {
     const i = n - 1;
     const col = Math.floor(i / maxRows);
     const row = i % maxRows;
