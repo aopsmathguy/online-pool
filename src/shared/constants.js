@@ -40,3 +40,11 @@ export const TEX_V_STRETCH = 2;
 // because no frames are streamed while the table is at rest, so any mismatch
 // snap-rotates every ball on the first frame of the next shot's replay.
 export const RACK_QUAT = { x: -Math.SQRT1_2, y: 0, z: 0, w: Math.SQRT1_2 };
+
+// Synthetic cue draw-back + strike prepended to every shot replay (client-side
+// shotPlayer.js). The recording itself starts at the moment of contact, so this
+// lead-in is what makes the stick visible before the balls move. The SERVER
+// needs it too: replayUntil gates the next shot on how long everyone is still
+// watching, and that window now includes this lead-in. Shared so the two can
+// never drift apart.
+export const SHOT_STRIKE_MS = 520;

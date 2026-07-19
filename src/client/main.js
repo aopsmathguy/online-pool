@@ -17,28 +17,55 @@ import {
 } from './cue.js';
 import { bindInput } from './input.js';
 import {
-  buildRack, applyBallsFrame, applyBallsFrameLerp, removeBallView, setCuePosition,
+  buildRack, syncRack, removeBallView, setCuePosition,
   getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
 } from './balls.view.js';
+import { makeShotPlayer, openingBalls } from './shotPlayer.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
   initReview, recordShot, resetReview, setReviewLayout, isReviewing, reviewTick,
-  reviewCueAnchor, openReviewPanel, reviewPocketedBaseline,
+  reviewCueAnchor, openReviewPanel, reviewPocketedBaseline, numberForBallId, reviewHistory,
 } from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
 import {
   packetSchemas, PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER,
-  LOBBY_WAITING, gameByteFromId,
+  LOBBY_WAITING, gameByteFromId, GAME_9BALL,
 } from '../shared/net/packets.js';
 
 // ---- Networking -------------------------------------------------------------
 const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-const socket = new SocketClient(new WebSocket(`${proto}//${location.host}`), { packetSchemas });
+const wsUrl = `${proto}//${location.host}`;
+const socket = new SocketClient(new WebSocket(wsUrl), { packetSchemas });
+
+// ---- Session (survives a reload) ---------------------------------------------
+// The server hands out a per-SEAT token in roomJoined and holds the seat for 45s
+// after a drop. Stashing {token, shotIndex} here is what lets a reload rejoin the
+// same game instead of landing on the menu. sessionStorage (not localStorage) so
+// the token is scoped to this tab — two tabs can never fight over one seat.
+const SESSION_KEY = 'poolSession';
+let session = null;                       // { token, code, shotIndex }
+let firstConnect = true;                  // the page-load connect resumes; later ones reconnect
+function loadSession() {
+  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
+}
+function saveSession(next) {
+  session = next;
+  try {
+    if (next) sessionStorage.setItem(SESSION_KEY, JSON.stringify(next));
+    else sessionStorage.removeItem(SESSION_KEY);
+  } catch { /* private mode — reconnect just won't survive a reload */ }
+}
+function noteShotWatched(index) {
+  // Recorded when a shot FINISHES replaying, not when it arrives: reloading
+  // mid-replay should replay that shot from the start, not skip it.
+  if (!session || index == null || index + 1 <= session.shotIndex) return;
+  saveSession({ ...session, shotIndex: index + 1 });
+}
 
 // ---- Client state -----------------------------------------------------------
-const net = { myIndex: -1, code: '', inGame: false, bot: false };  // bot: vs-Computer room
+const net = { myIndex: -1, code: '', inGame: false, bot: false, connected: true };  // bot: vs-Computer room
 let gs = { interact: PH_AIMING, current: 0, ballInHand: false, winner: -1 };  // last gameState
 let prevTurnKey = '';                                   // to detect my-turn transitions
 // opponentAim = the latest streamed target (from `aimState`, ~20 Hz).
@@ -122,8 +149,11 @@ function buildScene() {
   initCueStick();
 
   input = bindInput(canvas, {
-    isReady:  () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_AIMING && myTurn(),
-    isPlacing: () => net.inGame && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
+    // !replaying() also covers catching up after a reconnect: while the missed
+    // shots play out, `gs` still describes the state before them, so acting on
+    // it would aim at stale ball positions.
+    isReady:  () => net.inGame && net.connected && !replaying() && !isReviewing() && gs.interact === PH_AIMING && myTurn(),
+    isPlacing: () => net.inGame && net.connected && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
     onToggleView: cycleView,                            // V: cycle aim → free → top
     onZoom: (deltaY) => zoomCamera(deltaY),            // scroll: dolly the camera
     isOverCueBall,
@@ -151,6 +181,21 @@ function showMenu()  { show('menu', true);  show('lobby', false); net.inGame = f
 function showLobby(code) { show('menu', false); show('lobby', true); $('lobbyCode').textContent = code; }
 function showGame()  { show('menu', false); show('lobby', false); net.inGame = true; }
 
+// Connection status strip (reconnecting / opponent reconnecting). `text` is a
+// function so the caller can tick a countdown; pass null to clear.
+let bannerTimer = null;
+function setBanner(text, tick) {
+  if (bannerTimer) { clearInterval(bannerTimer); bannerTimer = null; }
+  const el = $('netBanner');
+  if (!text) { el.classList.add('hidden'); return; }
+  el.textContent = text();
+  el.classList.remove('hidden');
+  bannerTimer = setInterval(() => {
+    if (tick) tick();
+    el.textContent = text();
+  }, 1000);
+}
+
 function nameVal() { return ($('nameInput').value || 'Player').slice(0, 16); }
 function gameVal() { return parseInt($('gameSelect').value, 10) || 0; }
 
@@ -176,8 +221,10 @@ $('btnJoin').addEventListener('click',   () => {
   const code = ($('codeInput').value || '').toUpperCase().trim();
   if (code.length) socket.emit('joinRoom', { name: nameVal(), code });
 });
-$('btnLeaveLobby').addEventListener('click', () => { socket.emit('leaveRoom', {}); showMenu(); });
-$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); cancelReplay(); resetReview(); clearRack(); showMenu(); });
+// Leaving is deliberate: drop the session too, so a later reload goes to the
+// menu instead of trying to resume a game we walked away from.
+$('btnLeaveLobby').addEventListener('click', () => { socket.emit('leaveRoom', {}); saveSession(null); showMenu(); });
+$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); saveSession(null); cancelReplay(); resetReview(); clearRack(); showMenu(); });
 $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game: 255 }));
 
 // ---- Shot replay --------------------------------------------------------------
@@ -191,40 +238,48 @@ $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game
 // broadcast immediately after the recording, so they're QUEUED while the
 // replay runs and applied when it finishes — HUD messages and ball-in-hand
 // don't spoil the outcome early.
-const replay = { anim: null, start: 0, nextRemoval: 0, queue: [] };
-const replaying = () => !!replay.anim;
+//
+// Shots QUEUE rather than replace each other (replay.pending): a client that
+// reconnects after a drop is sent every shotAnim it missed back-to-back, and
+// plays them through in order at normal speed to catch up.
+// catchUp: this batch of shots is a reconnect backlog, not a live shot — the
+// camera goes overhead for the duration so you can see the whole table while
+// the missed shots play out.
+const replay = { player: null, anim: null, start: 0, queue: [], pending: [], catchUp: false };
+
+const drawingBack = () => !!replay.player && replay.player.drawingBackAt(performance.now() - replay.start);
+const replaying = () => !!replay.player || replay.pending.length > 0;
 
 function beginReplay(anim) {
-  // Frames arrive delta-encoded, positions and rotations independently: after
-  // full frame 0, a frame carries a ball's `pos` entry only if it moved since
-  // the last frame that sent one, and its `rot` entry only if it rotated —
-  // nothing on the wire is ever a duplicate. Expand back to full per-ball
-  // frames here by carrying last-known values forward, so the lerp below can
-  // keep treating every frame as complete.
-  const pos = new Map(), rot = new Map();         // id -> latest pos / rot
-  for (const f of anim.frames) {
-    for (const p of f.pos) pos.set(p.id, p);
-    for (const r of f.rot) rot.set(r.id, r);
-    f.balls = [];
-    for (const [id, p] of pos) {
-      const r = rot.get(id);
-      f.balls.push({ id, x: p.x, y: p.y, z: p.z, qx: r.qx, qy: r.qy, qz: r.qz, qw: r.qw });
-    }
-  }
-  // Reconcile against the authoritative start-of-shot set: frame 0 lists exactly
-  // the balls in play when the shot began (the server's live `balls`; pocketed
-  // ones were already cleared). Delete any rendered ball that isn't in it, so a
-  // pocketed ball's mesh can never linger into the next shot as a physics-less
-  // ghost. Skipped while reviewing — the review owns the meshes then and restores
-  // the live set on exit.
-  if (!isReviewing()) {
-    const live = new Set(anim.frames[0].balls.map(b => b.id));
-    for (const { id } of ballIds()) if (!live.has(id)) removeBallView(id);
-  }
+  // Catching up, anything deferred since the previous shot is THIS shot's
+  // pre-state (the server sends each backlog shot's gameState just before it).
+  // Hand those packets to the shot so they land when it starts playing, in
+  // arrival order. Whatever arrives after the LAST shot — the post-backlog
+  // balls/gameState/placing — stays in the queue and is applied when the batch
+  // finishes, which is what stops the final state going missing.
+  if (replay.catchUp && replay.queue.length) anim.pre = replay.queue.splice(0);
+  if (replay.player) { replay.pending.push(anim); return; }   // still watching the previous one
+  startAnim(anim);
+}
 
+// Start playing one shot. Deliberately deferred until the shot reaches the front
+// of the queue: recordShot below reads the PRE-shot `gs`, which is only correct
+// once the preceding shot's state has been applied.
+function startAnim(anim) {
+  // Reconcile to the authoritative start-of-shot set before playing: frame 0
+  // lists exactly the balls in play when the shot began. Anything we're missing
+  // is created (a ball pocketed later in a catch-up backlog must exist to be
+  // seen sinking) and anything spare is dropped. Skipped while reviewing — the
+  // review owns the meshes then and restores the live set on exit.
+  // This shot's own pre-state (HUD/status), applied before it plays.
+  if (anim.pre) { for (const { fn, data } of anim.pre) fn(data); anim.pre = null; }
+  if (!isReviewing()) syncRack(openingBalls(anim).map(withNumber));
+
+  // Every shot plays the same way, live or caught-up: draw back, strike, stick
+  // gone. Same call the review player makes.
+  replay.player = makeShotPlayer(anim, { animateStick: true });
   replay.anim = anim;
   replay.start = performance.now();
-  replay.nextRemoval = 0;
   // Post-shot gameState is deferred (afterReplay), so `gs` still holds the
   // PRE-shot state here — grab the shooter's chip name and the balls already
   // pocketed before this shot (the review's pocketed-column baseline).
@@ -232,35 +287,43 @@ function beginReplay(anim) {
   recordShot(anim, shooter, gs.pocketed || []);   // stash the shot for the review player
 }
 
+// Replay frames carry only ids; the rack needs numbers to texture a mesh. The
+// id→number map for this rack is fixed at startGame (shotReview owns it).
+const withNumber = (b) => ({ ...b, number: numberForBallId(b.id) });
+
 function tickReplay(now) {
-  const a = replay.anim;
-  if (!a) return;
-  // Playhead in keyframes. Clamped at 0: the rAF timestamp marks the start of
-  // the frame batch, so it can PREDATE the performance.now() beginReplay took
-  // inside the socket handler — unclamped that indexes frames[-1].
-  const tf = Math.max(0, (now - replay.start) / a.dtMs);
-  while (replay.nextRemoval < a.removals.length && a.removals[replay.nextRemoval].frame <= tf) {
-    removeBallView(a.removals[replay.nextRemoval].id);
-    replay.nextRemoval++;
-  }
-  const i = Math.floor(tf);
-  if (i >= a.frames.length - 1) return endReplay();
-  applyBallsFrameLerp(a.frames[i].balls, a.frames[i + 1].balls, tf - i);
+  const p = replay.player;
+  if (!p) return;
+  // Clamped at 0: the rAF timestamp marks the start of the frame batch, so it
+  // can PREDATE the performance.now() startAnim took inside the socket handler.
+  const t = Math.max(0, now - replay.start);
+  if (t >= p.duration) return endReplay();
+  p.applyAt(t);
 }
 
 function endReplay() {
+  const p = replay.player;
+  if (!p) return;
+  p.applyAt(p.duration);          // snap to the final frame
+  setCueVisible(false);
   const a = replay.anim;
-  if (!a) return;
-  while (replay.nextRemoval < a.removals.length) removeBallView(a.removals[replay.nextRemoval++].id);
-  applyBallsFrame(a.frames[a.frames.length - 1].balls);
+  replay.player = null;
   replay.anim = null;
+  noteShotWatched(a.index);                      // a reload now resumes AFTER this shot
+  // Catching up: roll straight into the next missed shot, and keep the deferred
+  // post-shot packets queued — they describe the state after the LAST one.
+  if (replay.pending.length) { startAnim(replay.pending.shift()); return; }
+  replay.catchUp = false;                        // backlog drained — camera back to normal
   const q = replay.queue.splice(0);
   for (const { fn, data } of q) fn(data);        // deliver the post-shot packets
 }
 
 function cancelReplay() {
+  replay.player = null;
   replay.anim = null;
+  replay.pending.length = 0;
   replay.queue.length = 0;
+  replay.catchUp = false;
 }
 
 // Defer a handler while a replay is playing; run it live otherwise.
@@ -270,10 +333,24 @@ const afterReplay = (fn) => (data) => {
 };
 
 // ---- Server events ----------------------------------------------------------
-socket.on('errorMsg', ({ message }) => { $('menuMsg').textContent = message; });
+socket.on('errorMsg', ({ message }) => {
+  // A rejected resume (seat gone, room torn down) is terminal — stop waiting.
+  if (net.resuming) { net.resuming = false; giveUp(message); return; }
+  $('menuMsg').textContent = message;
+});
 
-socket.on('roomJoined', ({ code, playerIndex, host }) => {
+socket.on('roomJoined', ({ code, playerIndex, host, token, bot }) => {
   net.myIndex = playerIndex; net.code = code;
+  // The server is the authority on whether this room has a computer opponent —
+  // a resumed client never went through the "Play Computer" button, so without
+  // this it would lose the difficulty slider.
+  net.bot = bot;
+  // Same token = we just resumed this seat, so the watched-shot count still
+  // applies; a new token is a new room and starts at zero. (A resume re-sends
+  // roomJoined, and it arrives BEFORE the backlog — zeroing here would make us
+  // re-watch shots we already finished.)
+  const watched = (session && session.token === token) ? session.shotIndex : 0;
+  saveSession({ token, code, shotIndex: watched });
   $('menuMsg').textContent = '';
   if (host) showLobby(code);   // waiting for opponent; startGame will reveal the game
 });
@@ -282,21 +359,41 @@ socket.on('lobby', ({ state, players }) => {
   if (state === LOBBY_WAITING) showLobby(net.code);
 });
 
-socket.on('startGame', ({ layout }) => {
+socket.on('startGame', ({ game, layout }) => {
   buildScene();
   cancelReplay();
   resetTopPan();             // recenter overhead for the new game
-  // Highest object-ball number = pocketed-column length (15 for 8-ball, 9 for 9-ball).
-  ballCount = layout.reduce((m, b) => (b.number !== 255 && b.number > m ? b.number : m), 0) || 15;
+  // Pocketed-column length. Taken from the ruleset, NOT from the layout's
+  // highest number: a resume rebuilds the rack from the balls still on the
+  // table, so the top ball may already be gone.
+  ballCount = game === GAME_9BALL ? 9 : 15;
   setReviewLayout(layout);   // fix id→number for this rack; clears past-game shots
   buildRack(layout);
+  if (net.resuming) {
+    // Resuming into the SAME rack: keep the watched-shot counter. Zeroing it
+    // here would make the next drop re-request shots we already sat through.
+    // (A genuinely new rack while we were away is safe too — the server clamps
+    // a stale index to its own shot count.) Shots that follow are the backlog:
+    // start it overhead so the whole table is visible — a starting preference,
+    // not a lock; V still cycles the view as it does for any opponent shot.
+    net.resuming = false;
+    replay.catchUp = true;
+    camPref = 'top';
+  } else if (session) {
+    saveSession({ ...session, shotIndex: 0 });   // new rack → new shot numbering
+  }
   const cue = layout.find(b => b.id === 0);
   if (cue) { localPlace.x = cue.x; localPlace.z = cue.z; }
   showGame();
+  placeBotSlider();          // show/hide the difficulty slider now, not only on the first gameState
   if (net.bot) socket.emit('botSkill', { value: botSkillVal() });  // sync slider → server
 });
 
-socket.on('gameState', afterReplay((state) => {
+// Adopt a game state: HUD text, player chips, turn-transition side effects. Used
+// both for live states and for the per-shot states that ride along with a
+// catch-up backlog, so the top bar tracks a replayed shot the same way it tracks
+// a live one.
+function applyGameState(state) {
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
   gs = state;
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
@@ -312,7 +409,12 @@ socket.on('gameState', afterReplay((state) => {
   // aim (below) instead of sweeping across the table from last turn's pose.
   if (gs.interact === PH_AIMING && !myTurn() && turnKey !== prevTurnKey) snapOpponent = true;
   prevTurnKey = turnKey;
-}));
+}
+
+// Deferred while a replay runs so the outcome isn't spoiled early. During a
+// catch-up the deferral is shorter: beginReplay claims whatever is queued as the
+// next shot's pre-state, so the status tracks the backlog shot by shot.
+socket.on('gameState', afterReplay(applyGameState));
 
 socket.on('placing', afterReplay((p) => {
   gs.interact = PH_PLACING;
@@ -322,7 +424,10 @@ socket.on('placing', afterReplay((p) => {
 }));
 
 socket.on('shotAnim', (anim) => beginReplay(anim));
-socket.on('balls', afterReplay(({ items }) => { applyBallsFrame(items); }));
+// The authoritative ball set, not just positions: reconcile the rack to match
+// exactly. This is what stops a ghost ball surviving past a shot — whatever the
+// client got up to during playback, this puts it back in agreement.
+socket.on('balls', afterReplay(({ items }) => { syncRack(items); }));
 socket.on('removeBall', afterReplay(({ id }) => { removeBallView(id); }));
 socket.on('aimState', (a) => {
   Object.assign(opponentAim, a);
@@ -330,13 +435,62 @@ socket.on('aimState', (a) => {
   if (snapOpponent) { Object.assign(opponentView, opponentAim); snapOpponent = false; }
 });
 
-socket.on('opponentLeft', () => {
-  $('menuMsg').textContent = 'Opponent left the game.';
-  cancelReplay(); resetReview(); clearRack(); showMenu();
+socket.on('opponentLeft', () => giveUp('Opponent left the game.'));
+
+// The opponent dropped but their seat is held — show a banner and wait, rather
+// than ending the game. opponentLeft still arrives if they never come back.
+socket.on('opponentState', ({ connected, secondsLeft }) => {
+  if (connected) { setBanner(null); return; }
+  let left = secondsLeft;
+  setBanner(() => `Opponent reconnecting… ${left}s`, () => (left = Math.max(0, left - 1)));
 });
-socket.on('disconnect', () => {
-  $('menuMsg').textContent = 'Disconnected from server.';
+
+// ---- Reconnect ---------------------------------------------------------------
+// A dropped socket is no longer fatal. If we hold a seat token we keep the table
+// on screen, dial back in, and `resume` — the server replays every shot taken
+// while we were away (see resumeSeat in server/index.js). The rack and the shot
+// review are deliberately NOT torn down here: they're what we resume into.
+const RECONNECT_WINDOW_MS = 45_000;
+let reconnectDeadline = 0, reconnectDelay = 0, reconnectTimer = null;
+
+function giveUp(message) {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectDeadline = 0;
+  setBanner(null);
+  saveSession(null);
+  $('menuMsg').textContent = message;
   cancelReplay(); resetReview(); clearRack(); showMenu();
+}
+
+function tryReconnect() {
+  reconnectTimer = null;
+  if (Date.now() > reconnectDeadline) { giveUp('Disconnected from server.'); return; }
+  // The `ws` setter detaches the old socket and re-inits on the new one while
+  // keeping every registered listener, so this is the whole reconnect.
+  socket.ws = new WebSocket(wsUrl);
+  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  reconnectTimer = setTimeout(tryReconnect, reconnectDelay);
+}
+
+socket.on('connect', () => {
+  net.connected = true;
+  if (!reconnectDeadline || !session) return;
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  reconnectDeadline = 0;
+  setBanner(null);            // we're back on the wire; a failed resume re-clears via giveUp
+  net.resuming = true;
+  socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
+});
+
+socket.on('disconnect', () => {
+  net.connected = false;
+  if (!session || !net.inGame) { giveUp('Disconnected from server.'); return; }
+  if (reconnectDeadline) return;                 // already retrying
+  reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
+  reconnectDelay = 500;
+  let left = Math.round(RECONNECT_WINDOW_MS / 1000);
+  setBanner(() => `Reconnecting… ${left}s`, () => (left = Math.max(0, left - 1)));
+  reconnectTimer = setTimeout(tryReconnect, reconnectDelay);
 });
 
 // The spin dial, power meter, camera-view label and pocketed balls are drawn on
@@ -345,6 +499,7 @@ socket.on('disconnect', () => {
 // ---- Aim streaming (so the opponent sees my cue) ----------------------------
 let lastAimSent = 0;
 function maybeSendAim(now) {
+  if (!net.connected) return;           // mid-reconnect: emitting on a dead socket re-fires disconnect
   if (now - lastAimSent < 50) return;   // ~20 Hz
   lastAimSent = now;
   const s = getStrikeOffset();
@@ -475,10 +630,15 @@ function loop(now) {
     const forcedTop = interact === PH_PLACING || interact === PH_OVER || !myTurn();
     const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
     setViewMode(view);
-    setCueVisible(interact === PH_AIMING);
+    // The stick also stays up through a catch-up shot's draw-back lead-in —
+    // tickReplay has already posed it along the recorded shot line.
+    setCueVisible(interact === PH_AIMING || drawingBack());
 
     if (cuePos && interact === PH_AIMING) updateCueAndCamera(cuePos);
-    else placeCamera();
+    else {
+      if (cuePos && drawingBack()) updateCueStick(cuePos);   // render it, don't move the camera
+      placeCamera();
+    }
 
     // HUD overlay: spin dial, power meter, camera view, pocketed balls. cue.js
     // state also carries the opponent's/bot's streamed aim while spectating, so
@@ -506,12 +666,35 @@ window.addEventListener('error', e => window.__errors.push(String(e.message || e
 window.__net = { socket, state: () => gs, me: () => net };
 window.__ballIds = ballIds;   // debug: client-side rendered ball set (ghost detection)
 window.__sunk = sunkNumbers;  // debug: balls currently dropped into a pocket
+window.__reviewHistory = reviewHistory;   // debug: recorded shot anims
 window.__reviewBaseline = reviewPocketedBaseline;   // debug: review pre-shot pocketed set
+// debug: cue stick state — visible, how far drawn back, and whether that's the
+// catch-up replay's draw-back lead-in driving it
+window.__cue = () => ({ visible: isCueVisible(), pullback: getPullback(), drawingBack: drawingBack() });
+// debug: replay pipeline state — is a shot playing, how many are queued behind
+// it, and how many deferred packets are waiting to be applied
+window.__camera = () => camera;          // debug: live camera (zoom/dolly checks)
+window.__cuePos = getCueMeshPosition;    // debug: cue ball position
+window.__replay = () => ({
+  playing: !!replay.player, pending: replay.pending.length,
+  queue: replay.queue.length, catchUp: replay.catchUp,
+});
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');
 if (params.get('game')) $('gameSelect').value = params.get('game');
 socket.on('connect', () => {
+  // A reload lands here with the seat token still in sessionStorage: resume the
+  // game in progress rather than acting on the URL and starting a fresh one.
+  if (firstConnect) {
+    firstConnect = false;
+    session = loadSession();
+    if (session && session.token) {
+      net.resuming = true;
+      socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
+      return;
+    }
+  }
   const j = params.get('join');
   if (j) socket.emit('joinRoom', { name: nameVal(), code: j.toUpperCase() });
   else if (params.has('create')) socket.emit('createRoom', { name: nameVal(), game: gameVal() });

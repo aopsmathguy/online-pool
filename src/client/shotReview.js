@@ -4,23 +4,13 @@
 // beginReplay, which expands it so each frame carries a full `balls` list). We
 // stash those anims here; a collapsible panel lets the player pick one and
 // play / pause / restart / scrub it like a video, with the SAME frame
-// interpolation the live replay uses (applyBallsFrameLerp). Reviewing is purely
+// interpolation the live replay uses (shotPlayer.js). Reviewing is purely
 // local: on entry we snapshot the live table and borrow the ball meshes; on
 // exit we rebuild the table from that snapshot, so the authoritative game is
 // never disturbed.
-import {
-  snapshotRack, rebuildFromSnapshot, applyBallsFrame, applyBallsFrameLerp,
-} from './balls.view.js';
-import {
-  setVisible as setCueVisible, setYaw, setPitch, setStrikeOffset, setPullback,
-} from './cue.js';
-
-// Synthetic cue-strike lead-in prepended to each shot's timeline: the recording
-// starts at the moment of contact (ball already moving), so to show the stick
-// we replay a short draw-back + thrust just before it. HOLD is the fraction of
-// the lead-in spent parked at full draw-back before the stick accelerates in.
-const STRIKE_MS = 520;
-const STRIKE_HOLD = 0.35;
+import { snapshotRack, syncRack } from './balls.view.js';
+import { setVisible as setCueVisible } from './cue.js';
+import { makeShotPlayer, openingBalls } from './shotPlayer.js';
 
 const history = [];            // { anim } per completed shot, in order
 let numberById = new Map();    // id -> number|null for THIS game (fixed per rack)
@@ -92,6 +82,12 @@ export function setReviewLayout(layout) {
   resetReview();
 }
 
+// id -> number (null = cue) for the current rack. Replay frames carry only ids,
+// so anything that has to (re)build a ball mesh from a frame needs this map.
+export function numberForBallId(id) {
+  return numberById.has(id) ? numberById.get(id) : null;
+}
+
 // Called from beginReplay with the already-expanded anim (frames carry .balls),
 // the name of the player who took the shot, and the pocketed set BEFORE it (so
 // the pocketed HUD can be rebuilt correctly as balls drop during the review).
@@ -103,6 +99,9 @@ export function recordShot(anim, shooter, pocketedBefore) {
 // The pocketed numbers as of the start of the loaded review shot (union with
 // balls currently below the felt gives the live pocketed column during review).
 export function reviewPocketedBaseline() { return cur ? cur.pocketedBefore : []; }
+
+// debug: the recorded shot history (used by tests to inspect frames/ids)
+export function reviewHistory() { return history; }
 
 // Dropdown label: "Shot N · <shooter>" plus the numbers sunk on that shot, if
 // any. Pocketed balls are exactly the anim's removals (the cue never appears —
@@ -144,17 +143,13 @@ function enter(i) {
   if (!h) return;
   if (!reviewing) { liveSnapshot = snapshotRack(); reviewing = true; }
   // Rebuild the rack to this shot's opening frame, matching numbers to ids.
-  const frame0 = h.anim.frames[0].balls;
-  rebuildFromSnapshot(frame0.map(b => ({
-    id: b.id, number: numberById.has(b.id) ? numberById.get(b.id) : null,
-    x: b.x, y: b.y, z: b.z, qx: b.qx, qy: b.qy, qz: b.qz, qw: b.qw,
-  })));
-  const ballDur = (h.anim.frames.length - 1) * h.anim.dtMs;   // ms of ball motion
-  const strikeDur = h.anim.shot ? STRIKE_MS : 0;              // draw-back lead-in
+  const frame0 = openingBalls(h.anim);
+  syncRack(frame0.map(b => ({ ...b, number: numberForBallId(b.id) })));
   const cue0 = frame0.find(b => b.id === 0);                  // cue's resting start
+  const player = makeShotPlayer(h.anim, { animateStick: true });
   cur = {
-    anim: h.anim, index: i, strikeDur, ballDur,
-    duration: strikeDur + ballDur, t: 0, playing: false,
+    player, duration: player.duration,
+    anim: h.anim, index: i, t: 0, playing: false,
     cueStart: cue0 ? { x: cue0.x, y: cue0.y, z: cue0.z } : null,
     pocketedBefore: h.pocketedBefore || [],
   };
@@ -168,7 +163,7 @@ function exit() {
   reviewing = false;
   cur = null;
   setCueVisible(false);   // the live loop re-shows it if it's an aiming turn
-  if (liveSnapshot) { rebuildFromSnapshot(liveSnapshot); liveSnapshot = null; }
+  if (liveSnapshot) { syncRack(liveSnapshot); liveSnapshot = null; }
   els.select.value = '-1';
   updateUi();
 }
@@ -192,45 +187,10 @@ function togglePlay() {
   updateUi();
 }
 
-// Show the balls at playhead `t` (ms), interpolating between the two keyframes
-// that bracket it — the same lerp/slerp the live replay uses.
-function applyAt(t) {
-  const a = cur.anim, frames = a.frames, last = frames.length - 1;
-
-  // Draw-back lead-in: balls parked at the opening frame; pose the cue stick.
-  if (t < cur.strikeDur) {
-    applyBallsFrame(frames[0].balls);
-    poseStick(t / cur.strikeDur);
-    return;
-  }
-  setCueVisible(false);   // strike over — hide the stick for the ball motion
-
-  let tf = (t - cur.strikeDur) / a.dtMs;
-  // Clamp the playhead: past the end (or NaN) snaps to the final frame; before
-  // the start to the first. Otherwise interpolate the bracketing keyframes, with
-  // i in [0, last-1] so i+1 is always a valid frame.
-  if (!(tf < last)) { applyBallsFrame(frames[last].balls); return; }
-  if (tf < 0) tf = 0;
-  const i = Math.floor(tf);
-  applyBallsFrameLerp(frames[i].balls, frames[i + 1].balls, tf - i);
-}
-
-// Pose the cue stick over the lead-in. `p` is 0..1 across the strike segment:
-// hold at full draw-back, then thrust the tip into the ball with an ease-in
-// (quadratic) so it accelerates through contact. Sets the aim state to the
-// recorded shot line; the loop then renders the stick at the cue-ball position.
-function poseStick(p) {
-  const shot = cur.anim.shot;
-  if (!shot) return;
-  setYaw(shot.yaw); setPitch(shot.pitch); setStrikeOffset(shot.strikeX, shot.strikeY);
-  let pull = shot.pullback;
-  if (p > STRIKE_HOLD) {
-    const q = (p - STRIKE_HOLD) / (1 - STRIKE_HOLD);   // 0..1 through the thrust
-    pull = shot.pullback * (1 - q * q);
-  }
-  setPullback(pull);
-  setCueVisible(true);
-}
+// Show the shot at playhead `t` (ms). All the actual work — draw-back posing,
+// keyframe interpolation, clamping — lives in the shared player, so scrubbing
+// here and watching live are the same code path by construction.
+function applyAt(t) { cur.player.applyAt(t); }
 
 function refreshSelect() {
   if (!els) return;

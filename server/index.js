@@ -13,6 +13,7 @@ import { SocketServer } from '../lib/socketUtility.js';
 import {
   packetSchemas, LOBBY_WAITING, LOBBY_READY, gameIdFromByte, gameByteFromId,
 } from '../src/shared/net/packets.js';
+import { SHOT_STRIKE_MS } from '../src/shared/constants.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -47,11 +48,26 @@ const httpServer = http.createServer((req, res) => {
 });
 
 // ---- Rooms + matchmaking ----------------------------------------------------
-// room: { code, rulesetId, conns:[conn,...], sim, bot? }
+// room: { code, rulesetId, seats:[seat,...], sim, bot?, shotLog, shotIndex }
+// seat: { token, name, conn: conn|null, timer }   — a SEAT outlives its socket
 // conn: { socket, name, room, index }
-// A bot room has one human conn (player 0) and `bot: { plan }` standing in for
+//
+// Seats, not sockets, are the players: a seat whose `conn` is null is a player
+// who dropped and has RECONNECT_GRACE_MS to come back with their token (see
+// handleDisconnect / the `resume` handler). It still counts as occupied, so
+// nobody can take it in the meantime.
+//
+// A bot room has one human seat (player 0) and `bot: { plan }` standing in for
 // player 1; the bot is driven from the tick loop (see tickBot below).
 const rooms = new Map();
+const RECONNECT_GRACE_MS = 45_000;
+// Shot retention. A shot has to outlive the moment it was played, because a
+// client can still be watching it: someone who reloads mid-replay reports that
+// shot as unwatched and must be replayed it from the beginning. So a window of
+// recent shots is kept even while everybody is connected, and the full backlog
+// while a seat is away.
+const MAX_SHOT_LOG = 40;               // cap while a seat is away
+const KEEP_RECENT = 8;                 // kept even when everyone is connected
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeCode() {
   let c;
@@ -59,9 +75,26 @@ function makeCode() {
   while (rooms.has(c));
   return c;
 }
-function names(room) { return room.conns.map(c => ({ name: c.name || 'Player' })); }
-function broadcast(room, event, data) { for (const c of room.conns) c.socket.emit(event, data); }
-function opponentOf(conn) { const r = conn.room; return r && r.conns[1 - conn.index]; }
+function makeSeat(conn) {
+  return { token: crypto.randomUUID(), name: conn.name || 'Player', conn, timer: null };
+}
+function names(room) { return room.seats.map(s => ({ name: s.name || 'Player' })); }
+// Broadcast reaches only seats that currently hold a socket; a dropped player
+// catches up from the shot log when they resume.
+function broadcast(room, event, data) {
+  for (const s of room.seats) if (s.conn) s.conn.socket.emit(event, data);
+}
+function opponentOf(conn) { const r = conn.room; return r && r.seats[1 - conn.index]; }
+function emitTo(seat, event, data) { if (seat && seat.conn) seat.conn.socket.emit(event, data); }
+const anySeatAway = (room) => room.seats.some(s => !s.conn);
+
+// Drop shots nobody can still need. While a seat is away the whole backlog is
+// kept (up to a cap); once everyone is back only a recent window is, which is
+// what still covers a client reloading part-way through a replay.
+function trimShotLog(room) {
+  const keep = anySeatAway(room) ? MAX_SHOT_LOG : KEEP_RECENT;
+  if (room.shotLog.length > keep) room.shotLog.splice(0, room.shotLog.length - keep);
+}
 
 // Bot difficulty is 0-100 on the wire, 0..1 in the sim. Both the initial
 // (playBot) and live (botSkill) paths run values through THIS one clamp, so the
@@ -71,30 +104,36 @@ const toSkill = (v) => Math.max(0, Math.min(100, v | 0)) / 100;
 function createRoom(conn, rulesetId, isPublic = false) {
   // isPublic rooms are the quick-play pool; private (code-shared) rooms are not
   // eligible for quick-play matching.
-  const room = { code: makeCode(), rulesetId, conns: [conn], sim: null, public: isPublic };
+  const seat = makeSeat(conn);
+  const room = {
+    code: makeCode(), rulesetId, seats: [seat], sim: null, public: isPublic,
+    shotLog: [], shotIndex: 0,
+  };
   rooms.set(room.code, room);
   conn.room = room; conn.index = 0;
-  conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(rulesetId), host: true });
+  conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(rulesetId), host: true, token: seat.token, bot: false });
   conn.socket.emit('lobby', { state: LOBBY_WAITING, players: names(room) });
   return room;
 }
 
 function joinRoomObj(conn, room) {
-  conn.room = room; conn.index = room.conns.length;
-  room.conns.push(conn);
-  conn.socket.emit('roomJoined', { code: room.code, playerIndex: conn.index, game: gameByteFromId(room.rulesetId), host: false });
+  const seat = makeSeat(conn);
+  conn.room = room; conn.index = room.seats.length;
+  room.seats.push(seat);
+  conn.socket.emit('roomJoined', { code: room.code, playerIndex: conn.index, game: gameByteFromId(room.rulesetId), host: false, token: seat.token, bot: !!room.bot });
   broadcast(room, 'lobby', { state: LOBBY_READY, players: names(room) });
   startMatch(room);
 }
 
 function startMatch(room, changeGame) {
-  if (room.conns.length < 2 && !room.bot) return;
+  if (room.seats.length < 2 && !room.bot) return;
   if (!room.sim) room.sim = new RoomSim(room.rulesetId);
   room.replayUntil = 0;                 // a new rack cancels any pending replay gate
+  room.shotLog = []; room.shotIndex = 0;   // new rack, new shot numbering
   if (room.bot) room.bot.plan = null;   // drop any stale bot decision
   room.sim.setPlayerNames(
-    room.conns[0].name || 'Player 1',
-    room.bot ? 'Computer' : (room.conns[1].name || 'Player 2'),
+    room.seats[0].name || 'Player 1',
+    room.bot ? 'Computer' : (room.seats[1].name || 'Player 2'),
   );
   const info = room.sim.newGame(changeGame);
   room.rulesetId = info.game;   // ruleset string id (e.g. '8ball')
@@ -111,9 +150,24 @@ function startMatch(room, changeGame) {
 // replay finishes; replayUntil stops the server accepting the next shot (or
 // the bot deciding) while everyone is still watching.
 function performShot(room, playerIdx, params) {
+  // Captured BEFORE the shot resolves: a resuming client needs the HUD state as
+  // it stood when the backlog begins (names, groups, whose turn), otherwise its
+  // top bar sits blank for the whole catch-up. Only worth computing when
+  // somebody is actually away.
+  // Captured BEFORE the shot resolves, for every shot: the HUD state and the
+  // rack as they stood when this shot was taken. A resuming client rebuilds
+  // from these — without the layout, balls pocketed during a replayed shot have
+  // no mesh and appear already-gone instead of sinking.
+  const pre = room.sim.gameStatePacket();
+  const preLayout = room.sim.startInfo();
   const anim = room.sim.applyShoot(playerIdx, params);
   if (!anim) return false;
-  room.replayUntil = Date.now() + anim.durationMs + 250;
+  // Clients play a draw-back lead-in before the recorded motion, so the window
+  // everyone is still watching is that much longer than the recording itself.
+  room.replayUntil = Date.now() + SHOT_STRIKE_MS + anim.durationMs + 250;
+  anim.packet.index = room.shotIndex++;
+  room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
+  trimShotLog(room);
   broadcast(room, 'shotAnim', anim.packet);
   broadcast(room, 'balls', room.sim.ballsFrame());              // final resting frame
   broadcast(room, 'gameState', room.sim.gameStatePacket());
@@ -121,13 +175,106 @@ function performShot(room, playerIdx, params) {
   return true;
 }
 
+// Tear the room down for good: nobody is coming back. Used by an explicit
+// "leave", by a lobby-stage drop, and by dropSeat when the grace runs out.
+function destroyRoom(room, exceptConn) {
+  rooms.delete(room.code);
+  for (const seat of room.seats) {
+    if (seat.timer) { clearTimeout(seat.timer); seat.timer = null; }
+    const c = seat.conn;
+    seat.conn = null;
+    if (!c) continue;
+    c.room = null;
+    if (c !== exceptConn) c.socket.emit('opponentLeft', {});
+  }
+  room.shotLog = [];
+}
+
 function leaveRoom(conn) {
   const room = conn.room;
   if (!room) return;
-  const opp = opponentOf(conn);
-  rooms.delete(room.code);
   conn.room = null;
-  if (opp) { opp.socket.emit('opponentLeft', {}); opp.room = null; }
+  destroyRoom(room, conn);
+}
+
+// The grace ran out — the absent player is gone for good.
+function dropSeat(room) {
+  if (rooms.get(room.code) !== room) return;   // already torn down
+  destroyRoom(room);
+}
+
+// A socket died. Unlike leaveRoom this HOLDS the seat: the room, its sim and
+// its shot log stay alive for RECONNECT_GRACE_MS so the player can come back
+// with their token and be replayed everything they missed.
+function handleDisconnect(conn) {
+  const room = conn.room;
+  if (!room) return;
+  // Nothing worth preserving before the match starts — behave as today.
+  if (!room.sim) { leaveRoom(conn); return; }
+
+  const seat = room.seats[conn.index];
+  conn.room = null;
+  if (!seat || seat.conn !== conn) return;     // already superseded by a resume
+  seat.conn = null;
+  if (seat.timer) clearTimeout(seat.timer);
+  seat.timer = setTimeout(() => dropSeat(room), RECONNECT_GRACE_MS);
+  emitTo(opponentOf({ room, index: conn.index }), 'opponentState',
+    { connected: false, secondsLeft: Math.round(RECONNECT_GRACE_MS / 1000) });
+}
+
+// Rebuild a returning client from scratch, then replay the shots it missed.
+// Every packet here already exists — this is startMatch's opening sequence plus
+// the backlog from the shot log.
+function resumeSeat(conn, room, seatIndex, lastShot) {
+  const seat = room.seats[seatIndex];
+  if (seat.timer) { clearTimeout(seat.timer); seat.timer = null; }
+  seat.conn = conn;
+  conn.room = room; conn.index = seatIndex; conn.name = seat.name;
+
+  const sim = room.sim;
+  conn.socket.emit('roomJoined', {
+    code: room.code, playerIndex: seatIndex, game: gameByteFromId(room.rulesetId),
+    host: false, token: seat.token, bot: !!room.bot,
+  });
+  const from = Math.max(0, Math.min(lastShot | 0, room.shotIndex));
+  // Whatever we still have from `from` onward. If the window has already
+  // dropped some, the client just sees fewer shots — never a broken one: each
+  // replayed shot reconciles the rack from its own frame 0.
+  const missed = room.shotLog.filter(s => s.index >= from);
+
+  // Build the rack from the table as it stood at the START of the backlog, not
+  // as it stands now: the balls sunk during those missed shots must exist as
+  // meshes so the replay can show them being pocketed. The trailing `balls` +
+  // `gameState` below reconcile to the present once the backlog finishes.
+  const info = (missed.length && missed[0].preLayout) || sim.startInfo();
+  conn.socket.emit('startGame', { game: gameByteFromId(info.game), firstPlayer: info.firstPlayer, layout: info.layout });
+
+  // Each shot is preceded by the HUD state as it stood when that shot was taken,
+  // so the top bar and status track the backlog shot by shot instead of being
+  // frozen at the batch's opening state. The client attaches a gameState that
+  // arrives mid-catch-up to the NEXT queued shot rather than deferring it to the
+  // end (see beginReplay), which is what keeps them in step.
+  for (const s of missed) {
+    conn.socket.emit('gameState', s.pre);
+    conn.socket.emit('shotAnim', s.packet);
+  }
+
+  // The client defers these behind its replay queue, so they land only after
+  // the last missed shot has finished playing.
+  conn.socket.emit('balls', sim.ballsFrame());
+  conn.socket.emit('gameState', sim.gameStatePacket());
+  if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());
+
+  // If we're resuming into the OPPONENT's aiming turn, hand over the pose their
+  // cue stick is currently in. Without this the spectated stick sits at its
+  // default until they happen to move again — which, for a bot mid-countdown,
+  // may not be until after it has already shot.
+  if (sim.phase() === PH_AIMING && sim.currentPlayer() !== seatIndex) {
+    conn.socket.emit('aimState', sim.currentAim());
+  }
+
+  emitTo(opponentOf(conn), 'opponentState', { connected: true, secondsLeft: 0 });
+  trimShotLog(room);   // everyone back → shrink to the recent window
 }
 
 // ---- Connection handling ----------------------------------------------------
@@ -148,7 +295,9 @@ socketServer.on('connection', (socket) => {
     conn.name = name || 'Player';
     const room = rooms.get((code || '').toUpperCase());
     if (!room) { socket.emit('errorMsg', { message: 'Room not found.' }); return; }
-    if (room.conns.length >= 2 || room.bot) { socket.emit('errorMsg', { message: 'Room is full.' }); return; }
+    // A held (disconnected) seat still counts as taken — only its token holder
+    // may reclaim it.
+    if (room.seats.length >= 2 || room.bot) { socket.emit('errorMsg', { message: 'Room is full.' }); return; }
     joinRoomObj(conn, room);
   });
 
@@ -161,7 +310,7 @@ socketServer.on('connection', (socket) => {
     // and an 8-ball seeker never lands in a 9-ball room (or vice versa).
     let waiting = null;
     for (const room of rooms.values()) {
-      if (room.public && room.conns.length === 1 && !room.sim && room.rulesetId === wantId) {
+      if (room.public && room.seats.length === 1 && !room.sim && room.rulesetId === wantId) {
         waiting = room; break;
       }
     }
@@ -175,13 +324,15 @@ socketServer.on('connection', (socket) => {
     // Private single-player room: the human is player 0, the bot fills seat 1.
     // Seed the bot's difficulty from the client's slider (no server-side default
     // to drift out of sync with the UI).
+    const seat = makeSeat(conn);
     const room = {
-      code: makeCode(), rulesetId: gameIdFromByte(game), conns: [conn],
+      code: makeCode(), rulesetId: gameIdFromByte(game), seats: [seat],
       sim: null, public: false, bot: { plan: null, skill: toSkill(skill) },
+      shotLog: [], shotIndex: 0,
     };
     rooms.set(room.code, room);
     conn.room = room; conn.index = 0;
-    conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(room.rulesetId), host: false });
+    conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(room.rulesetId), host: false, token: seat.token, bot: true });
     startMatch(room);
   });
 
@@ -231,8 +382,23 @@ socketServer.on('connection', (socket) => {
     }
   });
 
+  // Reclaim a held seat after a drop/reload, and get replayed what was missed.
+  socket.on('resume', ({ token, lastShot }) => {
+    if (conn.room) return;
+    for (const room of rooms.values()) {
+      const i = room.seats.findIndex(s => s.token === token);
+      if (i < 0) continue;
+      if (!room.sim) break;                         // never started; nothing to resume into
+      if (room.seats[i].conn) break;                // seat already live elsewhere
+      conn.name = room.seats[i].name;
+      resumeSeat(conn, room, i, lastShot);
+      return;
+    }
+    socket.emit('errorMsg', { message: 'Session expired.' });
+  });
+
   socket.on('leaveRoom', () => leaveRoom(conn));
-  socket.on('disconnect', () => leaveRoom(conn));
+  socket.on('disconnect', () => handleDisconnect(conn));
 });
 
 // ---- Computer opponent (bot rooms) -------------------------------------------
@@ -242,6 +408,13 @@ socketServer.on('connection', (socket) => {
 const BOT_SHOT_DELAY = 1.6;    // seconds from "aim shown" to the strike
 const BOT_PLACE_DELAY = 0.9;   // seconds before ball-in-hand placement confirms
 const BOT_DRAW_TIME = 0.7;     // final seconds of the delay spent drawing back
+
+// Record the bot's aim on the sim as well as streaming it, so a client that
+// resumes mid-turn can be handed the pose the cue stick is currently in.
+function sendBotAim(room, aim) {
+  room.sim.noteAim(aim);
+  broadcast(room, 'aimState', aim);
+}
 
 function botAimPacket(shot, pullback) {
   return { yaw: shot.yaw, pitch: shot.pitch, strikeX: shot.strikeX, strikeY: shot.strikeY, pullback };
@@ -266,7 +439,7 @@ function tickBot(room, dt) {
     } else {
       const shot = computeBotShot(sim, bot.skill);
       bot.plan = { phase, t: BOT_SHOT_DELAY, shot, lastAimSent: Infinity };
-      broadcast(room, 'aimState', botAimPacket(shot, 0));
+      sendBotAim(room, botAimPacket(shot, 0));
     }
   }
 
@@ -277,7 +450,7 @@ function tickBot(room, dt) {
     if (p.shot && p.t < BOT_DRAW_TIME && p.lastAimSent - p.t >= 0.05) {
       p.lastAimSent = p.t;
       const pull = p.shot.power * (1 - p.t / BOT_DRAW_TIME);
-      broadcast(room, 'aimState', botAimPacket(p.shot, pull));
+      sendBotAim(room, botAimPacket(p.shot, pull));
     }
     return;
   }

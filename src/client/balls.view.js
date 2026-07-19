@@ -107,22 +107,6 @@ export function snapshotRack() {
   return out;
 }
 
-// Rebuild the rack from a snapshotRack()-style list, honouring each ball's full
-// pose (not the racked default buildRack applies). `number` is the raw number or
-// null for the cue.
-export function rebuildFromSnapshot(list) {
-  clearRack();
-  for (const spec of list) {
-    const number = spec.number;
-    const style = ballStyle(number);
-    const color = number != null ? BALL_COLORS[number] : "#ffffff";
-    const mesh = makeBallMesh({ style, color, number });
-    mesh.position.set(spec.x, spec.y, spec.z);
-    mesh.quaternion.set(spec.qx, spec.qy, spec.qz, spec.qw);
-    views.set(spec.id, { mesh, number, style });
-  }
-}
-
 export function clearRack() {
   for (const { mesh } of views.values()) {
     scene.remove(mesh);
@@ -131,6 +115,33 @@ export function clearRack() {
     mesh.material.dispose();
   }
   views.clear();
+}
+
+// Reconcile the rendered rack to EXACTLY `items` (the server's authoritative
+// ball set, from the `balls` packet): create meshes we're missing, delete ones
+// we have spare, and pose the rest. This is the anti-ghost guarantee — after
+// every shot the client's ball set is forced back into agreement with the
+// server, so no divergence (a missed removal, a replay that started from the
+// wrong rack, a resume mid-game) can persist beyond one shot.
+export function syncRack(items) {
+  const wanted = new Set();
+  for (const it of items) {
+    wanted.add(it.id);
+    const number = it.number === 255 ? null : it.number;
+    let v = views.get(it.id);
+    // A ball we don't have, or one whose identity changed under the same id:
+    // (re)build the mesh so the texture matches the number.
+    if (!v || v.number !== number) {
+      if (v) removeBallView(it.id);
+      const style = ballStyle(number);
+      const color = number != null ? BALL_COLORS[number] : "#ffffff";
+      v = { mesh: makeBallMesh({ style, color, number }), number, style };
+      views.set(it.id, v);
+    }
+    v.mesh.position.set(it.x, it.y, it.z);
+    v.mesh.quaternion.set(it.qx, it.qy, it.qz, it.qw);
+  }
+  for (const id of [...views.keys()]) if (!wanted.has(id)) removeBallView(id);
 }
 
 export function applyBallsFrame(items) {

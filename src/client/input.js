@@ -4,12 +4,13 @@
 //   - Free view: DRAG to look; the on-screen pad (or WASD/Space/Shift) moves.
 //   - Shoot: grab the cue stick over the left-middle power bar, DRAG it DOWN to
 //       build power (the tip marks how much), release to fire; ESC cancels.
-//   - Zoom: the on-screen +/- buttons (aim + overhead) or the mouse wheel.
+//   - Zoom: the on-screen +/- buttons (aim + overhead), the mouse wheel, or a
+//       two-finger pinch (aim slides along the stick; overhead also pans).
 //   - V cycles the camera; the on-screen view button does the same.
 //   - Ball-in-hand: drag to position the cue ball, release to place it.
 import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
-         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop } from './cue.js';
+         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop, pinchAim } from './cue.js';
 import { powerBarRect, spinDialRect } from './hudCanvas.js';
 
 const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
@@ -97,8 +98,10 @@ export function bindInput(canvas, handlers) {
   canvas.addEventListener('pointerdown', e => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    // Two fingers in overhead → pinch to zoom + pan (about the pinch midpoint).
-    if (pointers.size === 2 && getViewMode() === 'top') {
+    // Two fingers → pinch to zoom: overhead zooms + pans about the midpoint, aim
+    // slides the camera along the stick. Whatever single-finger drag was in
+    // progress is abandoned (a part-charged shot is cancelled, not fired).
+    if (pointers.size === 2 && (getViewMode() === 'top' || getViewMode() === 'aim')) {
       if (drag === 'power') setPullback(0);
       drag = null; dragId = null;
       try { canvas.setPointerCapture(e.pointerId); } catch {}
@@ -134,7 +137,8 @@ export function bindInput(canvas, handlers) {
     if (pinch && pointers.size >= 2) {
       const rect = canvas.getBoundingClientRect();
       const info = pinchInfo(rect);
-      pinchTop(info.midX, info.midY, pinch.midX, pinch.midY, info.dist, pinch.dist, rect.width, rect.height);
+      if (getViewMode() === 'aim') pinchAim(info.dist, pinch.dist);
+      else pinchTop(info.midX, info.midY, pinch.midX, pinch.midY, info.dist, pinch.dist, rect.width, rect.height);
       pinch = info;
       return;
     }
@@ -168,10 +172,15 @@ export function bindInput(canvas, handlers) {
     if (pinch) {
       if (pointers.size < 2) {
         pinch = null;
-        // One finger still down in overhead → hand off to a pan drag (no jump).
-        if (pointers.size === 1 && getViewMode() === 'top') {
-          const [remId, rem] = [...pointers.entries()][0];
-          drag = 'pan'; dragId = remId; lastX = rem.x; lastY = rem.y;
+        // One finger still down → hand off to that view's drag, starting from
+        // where the finger actually is so the camera doesn't jump.
+        if (pointers.size === 1) {
+          const view = getViewMode();
+          const mode = view === 'top' ? 'pan' : view === 'aim' ? 'aim' : null;
+          if (mode) {
+            const [remId, rem] = [...pointers.entries()][0];
+            drag = mode; dragId = remId; lastX = rem.x; lastY = rem.y;
+          }
         }
       }
       return;

@@ -189,6 +189,12 @@ export class RoomSim {
     return true;
   }
 
+  // Record an aim the server itself produced (the bot's). Keeps lastAim current
+  // for both kinds of player, so a client resuming mid-turn can be handed the
+  // pose the cue stick is actually in.
+  noteAim(aim) { this.lastAim = aim; }
+  currentAim() { return this.lastAim; }
+
   applyShoot(playerIdx, p) {
     if (playerIdx !== this.currentPlayer() || this.interact !== PH_AIMING) return false;
     if (!this.ballsAtRest()) return false;
@@ -356,14 +362,19 @@ export class RoomSim {
     };
   }
 
-  // Full absolute snapshot (the post-replay `balls` correction) — never
-  // delta-encoded, so it also wipes out any accumulated sub-eps residue.
+  // Full absolute snapshot — never delta-encoded, so it also wipes out any
+  // accumulated sub-eps residue. This is the authoritative BALL SET as well as
+  // the positions: the client rebuilds its rack to match exactly, so `number`
+  // is included (255 = cue) and anything absent here is deleted client-side.
   ballsFrame() {
     return {
       items: this.balls.concat(this.sunk).map(b => {
         const t = b.body.getWorldTransform();
         const o = t.getOrigin(), q = t.getRotation();
-        return { id: b.id, x: o.x(), y: o.y(), z: o.z(), qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w() };
+        return {
+          id: b.id, number: b.number == null ? 255 : b.number,
+          x: o.x(), y: o.y(), z: o.z(), qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w(),
+        };
       }),
     };
   }

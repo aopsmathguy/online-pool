@@ -74,6 +74,16 @@ export function zoomStep(inDir) {
   }
 }
 
+// Aim view pinch-zoom (two fingers): fingers apart → camera slides closer to
+// the ball, together → further back. Applied immediately rather than through the
+// eased target, so it tracks the fingers. There is no pan counterpart here — the
+// aim camera is anchored on the cue ball.
+export function pinchAim(dist, prevDist) {
+  if (!prevDist || !dist) return;
+  const d = clamp(camDist / (dist / prevDist), CAM_DIST_MIN, CAM_DIST_MAX);
+  camDist = d; camDistTarget = d;
+}
+
 // Overhead view: pan by dragging (the world point under the cursor stays under
 // it, so dragging down moves the table down on screen). dxPx/dyPx are pixel
 // deltas since the last move; viewHpx is the canvas height in CSS pixels.
