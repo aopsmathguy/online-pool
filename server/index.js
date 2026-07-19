@@ -25,7 +25,8 @@ globalThis.Ammo = require('../lib/ammo.server.cjs');
 const { initPhysics } = await import('../src/server/physics.js');
 await initPhysics();
 const { RoomSim, PH_PLACING, PH_AIMING } = await import('../src/server/sim.js');
-const { computeBotShot, computeBotPlacement } = await import('../src/server/ai.js');
+const { createBotClient } = await import('../src/server/botClient.js');
+const { createLoopbackPair } = await import('../src/server/loopbackSocket.js');
 
 // ---- Static file server -----------------------------------------------------
 const MIME = {
@@ -57,8 +58,9 @@ const httpServer = http.createServer((req, res) => {
 // handleDisconnect / the `resume` handler). It still counts as occupied, so
 // nobody can take it in the meantime.
 //
-// A bot room has one human seat (player 0) and `bot: { plan }` standing in for
-// player 1; the bot is driven from the tick loop (see tickBot below).
+// A vs-computer room is an ORDINARY two-seat room: the bot holds seat 1 through
+// a loopback socket and plays as a client (see botClient.js). `room.bot` is only
+// a handle for the difficulty slider -- the game loop knows nothing about it.
 const rooms = new Map();
 const RECONNECT_GRACE_MS = 45_000;
 // Shot retention. A shot has to outlive the moment it was played, because a
@@ -129,7 +131,11 @@ function trimShotLog(room) {
 // difficulty the server uses is always exactly the slider value the client sent.
 const toSkill = (v) => Math.max(0, Math.min(100, v | 0)) / 100;
 
-function createRoom(conn, rulesetId, isPublic = false) {
+// `announce` shows the caller the "waiting for an opponent" lobby; a vs-computer
+// room skips it because the opponent arrives in the same tick. `vsBot` only
+// tells the client to offer the difficulty slider — the server's game loop
+// treats a bot seat exactly like a human one.
+function createRoom(conn, rulesetId, isPublic = false, { announce = true, vsBot = false } = {}) {
   // isPublic rooms are the quick-play pool; private (code-shared) rooms are not
   // eligible for quick-play matching.
   const seat = makeSeat(conn);
@@ -139,8 +145,8 @@ function createRoom(conn, rulesetId, isPublic = false) {
   };
   rooms.set(room.code, room);
   conn.room = room; conn.index = 0;
-  conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(rulesetId), host: true, token: seat.token, bot: false });
-  conn.socket.emit('lobby', { state: LOBBY_WAITING, players: names(room) });
+  conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(rulesetId), host: announce, token: seat.token, bot: vsBot });
+  if (announce) conn.socket.emit('lobby', { state: LOBBY_WAITING, players: names(room) });
   return room;
 }
 
@@ -154,14 +160,13 @@ function joinRoomObj(conn, room) {
 }
 
 function startMatch(room, changeGame) {
-  if (room.seats.length < 2 && !room.bot) return;
+  if (room.seats.length < 2) return;
   if (!room.sim) room.sim = new RoomSim(room.rulesetId);
   room.replayUntil = 0;                 // a new rack cancels any pending replay gate
   room.shotLog = []; room.shotIndex = 0;   // new rack, new shot numbering
-  if (room.bot) room.bot.plan = null;   // drop any stale bot decision
   room.sim.setPlayerNames(
     room.seats[0].name || 'Player 1',
-    room.bot ? 'Computer' : (room.seats[1].name || 'Player 2'),
+    room.seats[1].name || 'Player 2',
   );
   const info = room.sim.newGame(changeGame);
   room.rulesetId = info.game;   // ruleset string id (e.g. '8ball')
@@ -317,7 +322,10 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
 const wss = new WebSocketServer({ server: httpServer });
 const socketServer = new SocketServer(wss, { packetSchemas });
 
-socketServer.on('connection', (socket) => {
+// Named (not an inline lambda) because the computer opponent is attached by
+// calling it directly on one end of a loopback pair — see spawnBot. Everything
+// below therefore applies to the bot exactly as it does to a person.
+function handleConnection(socket) {
   const conn = { socket, name: '', room: null, index: -1 };
 
   socket.on('createRoom', ({ name, game }) => {
@@ -333,7 +341,7 @@ socketServer.on('connection', (socket) => {
     if (!room) { socket.emit('errorMsg', { message: 'Room not found.' }); return; }
     // A held (disconnected) seat still counts as taken — only its token holder
     // may reclaim it.
-    if (room.seats.length >= 2 || room.bot) { socket.emit('errorMsg', { message: 'Room is full.' }); return; }
+    if (room.seats.length >= 2) { socket.emit('errorMsg', { message: 'Room is full.' }); return; }
     joinRoomObj(conn, room);
   });
 
@@ -357,19 +365,13 @@ socketServer.on('connection', (socket) => {
   socket.on('playBot', ({ name, game, skill }) => {
     if (conn.room) return;
     conn.name = name || 'Player';
-    // Private single-player room: the human is player 0, the bot fills seat 1.
-    // Seed the bot's difficulty from the client's slider (no server-side default
-    // to drift out of sync with the UI).
-    const seat = makeSeat(conn);
-    const room = {
-      code: makeCode(), rulesetId: gameIdFromByte(game), seats: [seat],
-      sim: null, public: false, bot: { plan: null, skill: toSkill(skill) },
-      shotLog: [], shotIndex: 0,
-    };
-    rooms.set(room.code, room);
-    conn.room = room; conn.index = 0;
-    conn.socket.emit('roomJoined', { code: room.code, playerIndex: 0, game: gameByteFromId(room.rulesetId), host: false, token: seat.token, bot: true });
-    startMatch(room);
+    // A private room the bot immediately fills. `announce: false` skips the
+    // "waiting for an opponent" lobby packet — the opponent is already here, and
+    // the client would otherwise flash the lobby screen on its way to the table.
+    // Difficulty is seeded from the client's slider so there is no server-side
+    // default to drift out of sync with the UI.
+    const room = createRoom(conn, gameIdFromByte(game), false, { announce: false, vsBot: true });
+    spawnBot(room, skill);
   });
 
   // Difficulty slider (bot rooms only). Applies from the bot's NEXT decision;
@@ -377,7 +379,7 @@ socketServer.on('connection', (socket) => {
   socket.on('botSkill', ({ value }) => {
     const room = conn.room;
     if (!room || !room.bot) return;
-    room.bot.skill = toSkill(value);
+    room.bot.setSkill(toSkill(value));
   });
 
   socket.on('newGame', ({ game }) => {
@@ -389,10 +391,9 @@ socketServer.on('connection', (socket) => {
   socket.on('aim', (aim) => {
     const room = conn.room;
     if (!room || !room.sim) return;
-    if (room.sim.applyAim(conn.index, aim)) {
-      const opp = opponentOf(conn);
-      if (opp) opp.socket.emit('aimState', aim);
-    }
+    // emitTo, not opp.socket: opponentOf returns a SEAT, which holds `.conn`
+    // (and may hold none, if that player is mid-reconnect).
+    if (room.sim.applyAim(conn.index, aim)) emitTo(opponentOf(conn), 'aimState', aim);
   });
 
   socket.on('shoot', (params) => {
@@ -433,82 +434,26 @@ socketServer.on('connection', (socket) => {
 
   socket.on('leaveRoom', () => leaveRoom(conn));
   socket.on('disconnect', () => handleDisconnect(conn));
-});
-
-// ---- Computer opponent (bot rooms) -------------------------------------------
-// Called every tick while a bot room exists. When it's the bot's turn it decides
-// ONCE (placement or shot via src/ai.js), streams its aim to the human so the
-// cue stick visibly lines up and draws back, then acts after a short delay.
-const BOT_SHOT_DELAY = 1.6;    // seconds from "aim shown" to the strike
-const BOT_PLACE_DELAY = 0.9;   // seconds before ball-in-hand placement confirms
-const BOT_DRAW_TIME = 0.7;     // final seconds of the delay spent drawing back
-
-// Record the bot's aim on the sim as well as streaming it, so a client that
-// resumes mid-turn can be handed the pose the cue stick is currently in.
-function sendBotAim(room, aim) {
-  room.sim.noteAim(aim);
-  broadcast(room, 'aimState', aim);
+  return conn;
 }
 
-function botAimPacket(shot, pullback) {
-  return { yaw: shot.yaw, pitch: shot.pitch, strikeX: shot.strikeX, strikeY: shot.strikeY, pullback };
+socketServer.on('connection', handleConnection);
+
+// Seat the computer opponent in `room`. It gets a loopback socket, goes through
+// handleConnection like any client, and joins by code — so from the server's
+// point of view the room simply fills up and startMatch fires as normal.
+function spawnBot(room, skill) {
+  const { a: botEnd, b: serverEnd } = createLoopbackPair();
+  const botConn = handleConnection(serverEnd);
+  const bot = createBotClient({
+    socket: botEnd,
+    getSim: () => (botConn.room ? botConn.room.sim : null),
+    skill: toSkill(skill),
+  });
+  room.bot = bot;   // handle for the difficulty slider; the game loop ignores it
+  botEnd.emit('joinRoom', { name: 'Computer', code: room.code });
+  return bot;
 }
-
-function tickBot(room, dt) {
-  const sim = room.sim, bot = room.bot;
-  if (replayLocked(room)) return;   // humans still watching the last shot
-  const phase = sim.phase();
-  if (sim.currentPlayer() !== 1 || (phase !== PH_AIMING && phase !== PH_PLACING)) {
-    bot.plan = null;
-    return;
-  }
-
-  if (!bot.plan || bot.plan.phase !== phase) {
-    if (phase === PH_PLACING) {
-      bot.plan = { phase, t: BOT_PLACE_DELAY, pos: computeBotPlacement(sim.readTable()) };
-      if (bot.plan.pos) {
-        sim.applyPlaceMove(1, bot.plan.pos.x, bot.plan.pos.z);
-        broadcast(room, 'placing', sim.placingPacket());
-      }
-    } else {
-      const shot = computeBotShot(sim.readTable(), bot.skill);
-      bot.plan = { phase, t: BOT_SHOT_DELAY, shot, lastAimSent: Infinity };
-      sendBotAim(room, botAimPacket(shot, 0));
-    }
-  }
-
-  bot.plan.t -= dt;
-  if (bot.plan.t > 0) {
-    // Stream the cue drawing back over the last BOT_DRAW_TIME seconds (~20 Hz).
-    const p = bot.plan;
-    if (p.shot && p.t < BOT_DRAW_TIME && p.lastAimSent - p.t >= 0.05) {
-      p.lastAimSent = p.t;
-      const pull = p.shot.power * (1 - p.t / BOT_DRAW_TIME);
-      sendBotAim(room, botAimPacket(p.shot, pull));
-    }
-    return;
-  }
-
-  const plan = bot.plan;
-  bot.plan = null;
-  if (plan.phase === PH_PLACING) {
-    if (sim.applyPlaceConfirm(1)) broadcastPhase(room);
-  } else {
-    performShot(room, 1, plan.shot);
-  }
-}
-
-// ---- Tick: drive bot rooms ---------------------------------------------------
-// Shot physics no longer runs here — applyShoot simulates the whole shot to
-// rest synchronously (250 Hz substeps) and performShot ships the recording.
-// The tick only paces the computer opponent.
-const TICK_MS = 1000 / 60;
-setInterval(() => {
-  const dt = TICK_MS / 1000;
-  for (const room of rooms.values()) {
-    if (room.bot && room.sim) tickBot(room, dt);
-  }
-}, TICK_MS);
 
 httpServer.listen(PORT, () => {
   console.log(`Pool server on http://localhost:${PORT}`);
