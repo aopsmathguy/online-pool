@@ -32,7 +32,7 @@ import { makeShotPlayer, openingBalls } from './shotPlayer.js';
 //   isReviewing()          the review player owns the meshes right now
 //   hideCue()              playback is over; put the stick away
 export function createReplayQueue({
-  syncRack, applyPost, onShotStart, onShotEnd, isReviewing, hideCue,
+  syncRack, applyPost, onShotStart, onShotEnd, onIdle, isReviewing, hideCue,
 }) {
   let player = null;      // the shot currently on screen
   let anim = null;        // its packet
@@ -84,7 +84,8 @@ export function createReplayQueue({
       anim = null;
       onShotEnd(done.index);                // a reload now resumes AFTER this shot
       if (done.post) applyPost(done.post);  // the shot's own outcome, never early
-      if (pending.length) startAnim(pending.shift());
+      if (pending.length) { startAnim(pending.shift()); return; }
+      if (onIdle) onIdle();                 // back to live: anything held can land now
     },
 
     // Drop everything without applying it — leaving a game, or a new rack.

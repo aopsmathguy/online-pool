@@ -25,10 +25,13 @@ const DRAW_TIME_MS = 700;      // final stretch of the delay spent drawing back
 const AIM_HZ_MS = 50;          // ~20 Hz aim streaming, same as a human client
 const WATCH_SLACK_MS = 150;    // beyond a shot's own length, before acting
 
-// `socket`  the bot's end of the loopback pair
-// `getSim`  () => the RoomSim for the room it is sitting in (or null)
-// `skill`   0..1, higher is more accurate
-export function createBotClient({ socket, getSim, skill = 0.5 }) {
+// `socket`    the bot's end of the loopback pair
+// `getSim`    () => the RoomSim for the room it is sitting in (or null)
+// `isLocked`  () => is the room still inside the window where humans are
+//             watching the last shot? The bot obeys the SAME gate the server
+//             enforces on people, rather than guessing with its own timer.
+// `skill`     0..1, higher is more accurate
+export function createBotClient({ socket, getSim, isLocked, skill = 0.5 }) {
   let myIndex = -1;
   let state = null;         // last gameState we were told about
   let busyUntil = 0;        // we are "watching" a shot until this wall-clock time
@@ -87,6 +90,12 @@ export function createBotClient({ socket, getSim, skill = 0.5 }) {
 
   function act() {
     if (!alive || !state || state.current !== myIndex) return done();
+    // Humans are still watching the previous shot. Acting now would land a
+    // `placing` broadcast in the middle of their replay and teleport the cue
+    // ball out from under it. Our own watch timer is an estimate; this gate is
+    // the server's own, so defer to it and look again shortly. `acting` stays
+    // set, so nothing else starts in the meantime.
+    if (isLocked && isLocked()) { later(act, 120); return; }
     const sim = getSim();
     if (!sim) return done();
     // The room may have moved on while we waited (a new rack, the turn passing

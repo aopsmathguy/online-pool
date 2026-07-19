@@ -255,6 +255,7 @@ const replay = createReplayQueue({
   // PRE-shot value at the instant playback begins.
   onShotStart: (anim) => recordShot(anim, anim.shooter, anim.pocketedBefore),
   onShotEnd: (index) => noteShotWatched(index),   // a reload now resumes AFTER this shot
+  onIdle: () => drainDeferredState(),            // back live: adopt anything held
   isReviewing,
   hideCue: () => setCueVisible(false),
 });
@@ -349,11 +350,56 @@ function applyPlacing(p) {
   setCuePosition(p.x, p.z);
 }
 
+// THE INVARIANT, and the guard that keeps it honest.
+//
+// While a replay is on screen the client is showing the PAST. A state-bearing
+// packet describes the PRESENT. Applying one during the other is the single bug
+// this codebase keeps producing: the HUD spoiling a shot before you watch it,
+// and a ball deleted from the table moments before the replay shows it being
+// pocketed. State must ride on the shot it belongs to (`post`), never arrive
+// alongside it.
+//
+// Normally nothing state-bearing arrives mid-replay, because a shot's outcome
+// rides on the shot. But the server's replay gate (replayLocked) is a WALL-CLOCK
+// ESTIMATE of when clients finish watching — a slow machine, a throttled tab or
+// a long frame can outlast it, and then a legitimate broadcast (an opponent
+// starting their ball-in-hand drag the moment the gate clears) lands early. No
+// server-side timing can close that; only the client knows when its replay ends.
+//
+// So the client refuses: hold the packet, apply it when playback goes idle.
+// Last-write-wins per packet type, not a queue of side effects to replay in
+// order — that distinction is what made the old afterReplay queue fragile.
+// This is a safety net for the racy edge, NOT the mechanism: if it starts
+// carrying the common case, something has regressed to sending state alongside
+// shots instead of inside them.
+const deferredState = new Map();   // packet name -> latest payload
+const handlers = new Map();        // packet name -> handler
+
+const whenLive = (name, fn) => {
+  handlers.set(name, fn);
+  return (data) => {
+    if (replay.isPlaying()) {
+      deferredState.set(name, data);
+      window.__errors.push(`state-deferred:${name}`);   // observed by test/browser/
+      return;
+    }
+    fn(data);
+  };
+};
+
+// Playback finished — adopt anything held, in arrival order.
+function drainDeferredState() {
+  if (!deferredState.size) return;
+  const held = [...deferredState.entries()];
+  deferredState.clear();
+  for (const [name, data] of held) handlers.get(name)(data);
+}
+
 // These arrive between shots (a new rack, a placement drag, a resume reconcile),
 // never during one — a shot's outcome rides inside the shot itself. No
 // deferral, no queue, no ordering to get right.
-socket.on('gameState', applyGameState);
-socket.on('placing', applyPlacing);
+socket.on('gameState', whenLive('gameState', applyGameState));
+socket.on('placing', whenLive('placing', applyPlacing));
 // history = a recording we asked for (requestShot) to review a shot watched
 // before we dropped. File it against its placeholder; never play it.
 socket.on('shotAnim', (anim) => {
@@ -367,7 +413,7 @@ socket.on('shotHistory', ({ shots }) => { for (const m of shots) recordShotMeta(
 // The authoritative ball set, not just positions: reconcile the rack to match
 // exactly. This is what stops a ghost ball surviving past a shot — whatever the
 // client got up to during playback, this puts it back in agreement.
-socket.on('balls', ({ items }) => syncRack(items));
+socket.on('balls', whenLive('balls', ({ items }) => syncRack(items)));
 socket.on('aimState', (a) => {
   Object.assign(opponentAim, a);
   // First aim of a new spectated turn → snap the shown cue to it, then ease.

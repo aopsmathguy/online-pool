@@ -5,7 +5,8 @@
   "description": "Server-authoritative online 8-ball / 9-ball pool",
   "scripts": {
     "start": "node server/index.js",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js",
+    "test:browser": "node --test --test-concurrency=1 test/browser/"
   },
   "engines": {
     "node": ">=20"

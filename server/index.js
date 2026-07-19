@@ -495,7 +495,21 @@ function handleConnection(socket) {
       const i = room.seats.findIndex(s => s.token === token);
       if (i < 0) continue;
       if (!room.sim) break;                         // never started; nothing to resume into
-      if (room.seats[i].conn) break;                // seat already live elsewhere
+      // The seat may STILL show the previous socket. A reload can land its
+      // `resume` before the old socket's close has been processed, and this
+      // used to answer "Session expired." — on which the client wipes its
+      // session, so a fast reload lost the game outright.
+      //
+      // The token is proof of ownership: it lives in sessionStorage, which is
+      // per-tab, so two tabs can never present the same one. Take the seat over
+      // and drop the stale socket. Clearing its `room` first means its late
+      // disconnect is ignored (handleDisconnect bails when seat.conn !== conn),
+      // so it cannot evict the connection that just replaced it.
+      const stale = room.seats[i].conn;
+      if (stale) {
+        stale.room = null;
+        try { stale.socket.disconnect?.(); } catch { /* already gone */ }
+      }
       conn.name = room.seats[i].name;
       resumeSeat(conn, room, i, lastShot);
       return;
@@ -519,6 +533,7 @@ function spawnBot(room, skill) {
   const bot = createBotClient({
     socket: botEnd,
     getSim: () => (botConn.room ? botConn.room.sim : null),
+    isLocked: () => !!botConn.room && replayLocked(botConn.room),
     skill: toSkill(skill),
   });
   room.bot = bot;   // handle for the difficulty slider; the game loop ignores it
