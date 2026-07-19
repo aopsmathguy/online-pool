@@ -29,6 +29,11 @@ export function clearHud() {
   if (ctx) ctx.clearRect(0, 0, cv.width, cv.height);
 }
 
+// Height of any chrome covering the bottom of the screen (the replay transport
+// bar). Everything bottom-anchored here lays out against the REDUCED height so
+// it lifts clear, and dialHitArea agrees with what was drawn.
+let bottomInset = 0;
+
 const MARGIN = 16;
 const DIAL_R = 46;      // spin dial radius (cue-ball face)
 const DOT_R = 8;        // strike-point marker
@@ -36,11 +41,13 @@ const DOT_R = 8;        // strike-point marker
 // state: { strikeX, strikeY (each -1..1), power (0..1), view, pocketed:[numbers] }
 export function drawHud(state = {}) {
   if (!ctx) return;
-  const { strikeX = 0, strikeY = 0, power = 0, view = 'aim', pocketed = [], ballCount = 15 } = state;
+  const { strikeX = 0, strikeY = 0, power = 0, view = 'aim', pocketed = [], ballCount = 15,
+          bottomInset: inset = 0 } = state;
+  bottomInset = inset;
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.save();
   ctx.scale(dpr, dpr);
-  const w = cv.width / dpr, h = cv.height / dpr;
+  const w = cv.width / dpr, h = cv.height / dpr - bottomInset;
 
   drawSpinDial(w, h, strikeX, strikeY, view);
   drawPowerStick(power);
@@ -55,7 +62,7 @@ const POWER_BAR_W = 20;
 const POWER_BAR_MAXH = 300;
 export function powerBarRect() {
   if (!cv) return null;
-  const w = cv.width / dpr, h = cv.height / dpr;
+  const w = cv.width / dpr, h = cv.height / dpr - bottomInset;
   const barH = Math.min(POWER_BAR_MAXH, h * 0.5);
   return { x: MARGIN + 6, yTop: (h - barH) / 2, w: POWER_BAR_W, h: barH };
 }
@@ -64,7 +71,7 @@ export function powerBarRect() {
 // with input.js, which hit-tests it so you can click/drag the strike point.
 export function spinDialRect() {
   if (!cv) return null;
-  const h = cv.height / dpr;
+  const h = cv.height / dpr - bottomInset;
   return { cx: MARGIN + DIAL_R, cy: h - MARGIN - DIAL_R, r: DIAL_R };
 }
 

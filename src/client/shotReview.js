@@ -16,6 +16,11 @@ import { makeShotPlayer, openingBalls } from './shotPlayer.js';
 // shot restored after a reconnect, where only the label metadata was sent and
 // the recording is fetched on demand (see enter/provideShot). Everything the
 // dropdown renders lives on the entry itself, so a placeholder looks the same.
+// One keyframe. Recordings are sampled every REPLAY_FRAME_DT (16 ms), so a step
+// of exactly that lands on the next captured frame rather than interpolating
+// between two — stepping shows you real simulated positions.
+const STEP_MS = 16;
+
 const history = [];            // { anim|null, index, shooter, pocketedBefore, removals }
 let numberById = new Map();    // id -> number|null for THIS game (fixed per rack)
 let reviewing = false;
@@ -42,6 +47,8 @@ export function initReview({ onNeedShot } = {}) {
     scrub:   document.getElementById('replayScrub'),
     time:    document.getElementById('replayTime'),
     exit:    document.getElementById('replayExit'),
+    bar:     document.getElementById('replayBar'),
+    which:   document.getElementById('replayWhich'),
   };
   els.toggle.addEventListener('click', () => {
     const collapsed = els.panel.classList.toggle('collapsed');
@@ -52,8 +59,8 @@ export function initReview({ onNeedShot } = {}) {
     if (Number.isInteger(i) && i >= 0) enter(i);
   });
   els.play.addEventListener('click', togglePlay);
-  els.stepBack.addEventListener('click', () => step(-4));
-  els.stepFwd.addEventListener('click', () => step(4));
+  els.stepBack.addEventListener('click', () => step(-STEP_MS));
+  els.stepFwd.addEventListener('click', () => step(STEP_MS));
   els.restart.addEventListener('click', () => {
     if (!cur) return;
     cur.t = 0; cur.playing = true; applyAt(0); updateUi();
@@ -153,6 +160,7 @@ function shotLabel(h, i) {
 // Leave review (if active) and clear all recorded shots.
 export function resetReview() {
   if (reviewing) exit();
+  showBar(false);
   history.length = 0;
   cur = null;
   pendingSlot = -1;
@@ -182,6 +190,8 @@ function enter(i) {
   if (!h.anim) {
     pendingSlot = i;
     els.select.value = String(i);
+    els.which.textContent = shotLabel(h, i);
+    showBar(true);
     els.time.textContent = 'Loading…';
     if (fetchShot) fetchShot(h.index);
     return;
@@ -200,7 +210,25 @@ function enter(i) {
   };
   lastNow = performance.now();
   els.select.value = String(i);
+  els.which.textContent = shotLabel(h, i);
+  showBar(true);
   applyAt(0); updateUi();
+}
+
+// The transport bar is up exactly while a shot is loaded. `body.reviewing`
+// lifts the other bottom-anchored controls clear of it (see styles.css); the
+// HUD canvas is inset separately, via reviewChromeHeight().
+function showBar(on) {
+  if (!els) return;
+  els.bar.classList.toggle('hidden', !on);
+  document.body.classList.toggle('reviewing', !!on);
+}
+
+// How much of the bottom of the screen the replay chrome is covering, so the
+// HUD canvas can draw its dial and pocketed column above it.
+export function reviewChromeHeight() {
+  if (!els || els.bar.classList.contains('hidden')) return 0;
+  return els.bar.offsetHeight || 0;
 }
 
 function exit() {
@@ -210,6 +238,8 @@ function exit() {
   setCueVisible(false);   // the live loop re-shows it if it's an aiming turn
   if (liveSnapshot) { syncRack(liveSnapshot); liveSnapshot = null; }
   els.select.value = '-1';
+  els.which.textContent = '';
+  showBar(false);
   updateUi();
 }
 

@@ -27,6 +27,7 @@ import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
   initReview, recordShot, recordShotMeta, provideShot, resetReview, setReviewLayout, isReviewing, reviewTick,
   reviewCueAnchor, openReviewPanel, reviewPocketedBaseline, numberForBallId, reviewHistory,
+  reviewChromeHeight,
 } from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
 import {
@@ -570,6 +571,7 @@ function loop(now) {
     drawHud({
       strikeX: s.x, strikeY: s.y, power: getPullback() / getMaxPullback(),
       view, pocketed: pocketedNow(reviewPocketedBaseline()), ballCount,
+      bottomInset: reviewChromeHeight(),   // draw above the replay transport bar
     });
     updateViewUi(view);
     $('banner').classList.remove('show');   // don't let the win banner cover the replay
