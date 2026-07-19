@@ -135,10 +135,12 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 #banner.show { display:flex; }
 
 /* Connection status strip — bottom-centre (the top belongs to the player chips),
-   and never covers the table */
-.netBanner { position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+   and never covers the table. Fixed, and above the .overlay menus (z-index 10):
+   it has to stay visible on the menu and lobby screens too, since reconnects
+   happen there as well. */
+.netBanner { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); z-index:20;
   padding:7px 16px; border-radius:8px;
   font-size:14px; font-weight:600; color:#ffdf9a; white-space:nowrap;
   background:rgba(6,10,25,0.85); border:1px solid rgba(255,223,154,0.35);
-  pointer-events:none; z-index:5; }
+  pointer-events:none; }
 .netBanner.hidden { display:none; }

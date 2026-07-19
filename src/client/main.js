@@ -187,7 +187,10 @@ let bannerTimer = null;
 function setBanner(text, tick) {
   if (bannerTimer) { clearInterval(bannerTimer); bannerTimer = null; }
   const el = $('netBanner');
-  if (!text) { el.classList.add('hidden'); return; }
+  // Clear the text as well as hiding: a stale "Reconnecting… 37s" left sitting
+  // in the DOM long after we reconnected reads as a live countdown to anyone
+  // inspecting the page.
+  if (!text) { el.classList.add('hidden'); el.textContent = ''; return; }
   el.textContent = text();
   el.classList.remove('hidden');
   bannerTimer = setInterval(() => {
@@ -446,16 +449,42 @@ socket.on('opponentState', ({ connected, secondsLeft }) => {
 });
 
 // ---- Reconnect ---------------------------------------------------------------
-// A dropped socket is no longer fatal. If we hold a seat token we keep the table
-// on screen, dial back in, and `resume` — the server replays every shot taken
-// while we were away (see resumeSeat in server/index.js). The rack and the shot
-// review are deliberately NOT torn down here: they're what we resume into.
-const RECONNECT_WINDOW_MS = 45_000;
+// A dropped socket is never fatal, on ANY screen. `emit` on a closed socket is
+// silently dropped (see emitEventCode in socketUtility.js), so without this the
+// menu looks alive but every button does nothing and only a reload fixes it.
+//
+// Two flavours, differing only in whether there is a clock:
+//
+//   In a game   The server holds our seat for RECONNECT_GRACE_MS and then tears
+//               the room down, so there IS a deadline. We keep the table on
+//               screen, dial back in, and `resume` — the server replays every
+//               shot taken while we were away (see resumeSeat in
+//               server/index.js). The rack and the shot review are deliberately
+//               NOT torn down: they're what we resume into.
+//
+//   Menu/lobby  Nothing is expiring, so there is no deadline and no failure —
+//               keep retrying until the server is back. This is what makes a
+//               server restart survivable without a reload.
+//
+// The window is the total budget before giving up, NOT a delay before trying:
+// the first attempt goes out 500ms after the drop, then backs off ×2 to a 5s
+// cap, so attempts land at 0.5, 1.5, 3.5, 7.5, 12.5 … 37.5s.
+//
+// Deliberately 5s under the server's 45s RECONNECT_GRACE_MS. What matters is
+// where the LAST attempt falls, since the backoff cap makes it land well short
+// of the window: at 45s it was t=42.5s, leaving only 2.5s for a handshake plus
+// the resume packet on a network that has just failed — and if that overruns,
+// the seat is gone and you get "Session expired" instead of reconnecting. At
+// 40s the last attempt is t=37.5s, so the margin is 7.5s.
+const RECONNECT_WINDOW_MS = 40_000;
+const RECONNECT_MAX_DELAY = 5000;
 let reconnectDeadline = 0, reconnectDelay = 0, reconnectTimer = null;
+let reconnecting = false;
 
 function giveUp(message) {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectDeadline = 0;
+  reconnecting = false;
   setBanner(null);
   saveSession(null);
   $('menuMsg').textContent = message;
@@ -464,32 +493,52 @@ function giveUp(message) {
 
 function tryReconnect() {
   reconnectTimer = null;
-  if (Date.now() > reconnectDeadline) { giveUp('Disconnected from server.'); return; }
+  // Only an in-game reconnect can time out; elsewhere reconnectDeadline is 0
+  // and we retry for as long as it takes.
+  if (reconnectDeadline && Date.now() > reconnectDeadline) {
+    giveUp('Disconnected from server.');
+    return;
+  }
   // The `ws` setter detaches the old socket and re-inits on the new one while
   // keeping every registered listener, so this is the whole reconnect.
   socket.ws = new WebSocket(wsUrl);
-  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY);
   reconnectTimer = setTimeout(tryReconnect, reconnectDelay);
 }
 
 socket.on('connect', () => {
   net.connected = true;
-  if (!reconnectDeadline || !session) return;
+  if (!reconnecting) return;              // first connect — handled at the bottom of this file
+  reconnecting = false;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   reconnectDeadline = 0;
-  setBanner(null);            // we're back on the wire; a failed resume re-clears via giveUp
-  net.resuming = true;
-  socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
+  setBanner(null);                        // back on the wire; a failed resume re-clears via giveUp
+
+  // Reclaim the seat if we hold a token — in a game OR sitting in a lobby. The
+  // server adjudicates: a lobby room is destroyed on drop (it has no sim to
+  // preserve), so that resume is rejected and errorMsg lands us back on the
+  // menu, now with a working socket instead of a dead one. Without a token
+  // there is nothing to reclaim and being connected again is the whole job.
+  if (session && session.token) {
+    net.resuming = true;
+    socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
+  }
 });
 
 socket.on('disconnect', () => {
   net.connected = false;
-  if (!session || !net.inGame) { giveUp('Disconnected from server.'); return; }
-  if (reconnectDeadline) return;                 // already retrying
-  reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
+  if (reconnecting) return;               // already retrying
+  reconnecting = true;
   reconnectDelay = 500;
-  let left = Math.round(RECONNECT_WINDOW_MS / 1000);
-  setBanner(() => `Reconnecting… ${left}s`, () => (left = Math.max(0, left - 1)));
+
+  if (session && net.inGame) {
+    reconnectDeadline = Date.now() + RECONNECT_WINDOW_MS;
+    let left = Math.round(RECONNECT_WINDOW_MS / 1000);
+    setBanner(() => `Reconnecting… ${left}s`, () => (left = Math.max(0, left - 1)));
+  } else {
+    reconnectDeadline = 0;                // nothing to lose: retry indefinitely
+    setBanner(() => 'Reconnecting…');
+  }
   reconnectTimer = setTimeout(tryReconnect, reconnectDelay);
 });
 
@@ -688,17 +737,24 @@ const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');
 if (params.get('game')) $('gameSelect').value = params.get('game');
 socket.on('connect', () => {
+  // FIRST connect only. The URL params below are a one-shot instruction for
+  // opening the page, not something to re-run every time the socket comes back:
+  // reconnecting with ?bot in the URL must not silently start a second game.
+  // (This was previously masked — reconnects only happened mid-game, where the
+  // resume above had already set conn.room and the server ignored the duplicate
+  // action. Menu reconnects removed that cover.)
+  if (!firstConnect) return;
+  firstConnect = false;
+
   // A reload lands here with the seat token still in sessionStorage: resume the
   // game in progress rather than acting on the URL and starting a fresh one.
-  if (firstConnect) {
-    firstConnect = false;
-    session = loadSession();
-    if (session && session.token) {
-      net.resuming = true;
-      socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
-      return;
-    }
+  session = loadSession();
+  if (session && session.token) {
+    net.resuming = true;
+    socket.emit('resume', { token: session.token, lastShot: session.shotIndex | 0 });
+    return;
   }
+
   const j = params.get('join');
   if (j) socket.emit('joinRoom', { name: nameVal(), code: j.toUpperCase() });
   else if (params.has('create')) socket.emit('createRoom', { name: nameVal(), game: gameVal() });

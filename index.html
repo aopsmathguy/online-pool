@@ -11,6 +11,13 @@
   </script>
 </head>
 <body>
+  <!-- Connection status strip (reconnecting / opponent reconnecting). A direct
+       child of <body>, ABOVE the menu and lobby overlays, because a dropped
+       socket is reconnected in every screen — not just in-game — and the strip
+       is the only thing telling you why the buttons aren't responding. Unlike
+       #banner it never covers the table: the game stays watchable. -->
+  <div id="netBanner" class="netBanner hidden"></div>
+
   <!-- ===== Menu ===== -->
   <div id="menu" class="overlay">
     <div class="panel">
@@ -56,9 +63,6 @@
            drawn over the 3D stage. pointer-events:none so it never eats input. -->
       <canvas id="hudCanvas"></canvas>
       <div id="banner"></div>
-      <!-- Connection status strip (reconnecting / opponent reconnecting). Unlike
-           #banner this never covers the table — the game stays watchable. -->
-      <div id="netBanner" class="netBanner hidden"></div>
 
       <!-- Top-left hamburger: game actions + collapsible replays + instructions -->
       <div id="sideMenu" class="sideMenu collapsed">
