@@ -21,6 +21,7 @@ import { buildTableWorld, railPoints } from './table.world.js';
 import { computeBounds, resolvePlacement, HEAD_STRING_X } from './placement.js';
 import { startInfo, ballsFrame, gameStatePacket, placingPacket } from './simView.js';
 import { resolveStrike } from './strike.js';
+import { createShotRecorder, REPLAY_FRAME_DT } from './shotRecorder.js';
 import { resetRack, setBallPosition, spotBall } from './balls.logic.js';
 import { createGame } from '../shared/game.js';
 import { densify } from '../shared/clearance.js';
@@ -33,22 +34,9 @@ import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packe
 const LIN_REST = 0.01;   // m/s
 const ANG_REST = 0.20;   // rad/s
 
-// Shot replay recording: physics runs to rest synchronously on shoot, sampled
-// into keyframes every REPLAY_FRAME_DT for the client to animate through.
-// Kept an exact multiple of FIXED_DT (4 × 4 ms = 16 ms, ~62 fps) so keyframes
-// land on step boundaries — uniform spacing, no temporal jitter in the replay.
-const REPLAY_FRAME_DT = FIXED_DT * 4;
+// Physics runs to rest synchronously on shoot, sampled into keyframes every
+// REPLAY_FRAME_DT for the client to animate through (see shotRecorder.js).
 const MAX_SHOT_SECONDS = 60;     // hard cap so a pathological shot can't hang
-
-// Delta keyframes: a ball's position (and, independently, its rotation) is
-// included in a frame only if it changed beyond these thresholds since the
-// last frame that transmitted it — resting balls cost zero bytes per frame,
-// and a ball spinning in place resends only its quaternion. Thresholds are
-// far below anything visible (0.1 mm; ~0.11° of rotation) and compare against
-// the last TRANSMITTED value, so slow drift still accumulates into a resend
-// rather than being swallowed frame after frame.
-const POS_EPS = 1e-4;    // m
-const QUAT_EPS = 1e-3;   // per quaternion component
 
 // Pocket capture geometry (Y threshold + radii + hit tests) lives in pockets.js.
 const OOB_X = tableW / 2 + 0.15;
@@ -56,6 +44,16 @@ const OOB_Z = tableH / 2 + 0.15;
 
 const SPOT_X = tableW * 0.25;
 const SPOT_HALF = tableW / 2 - 2 * R;
+
+// One ball's world pose, flattened for the recorder (which never sees Ammo).
+function pose(b) {
+  const t = b.body.getWorldTransform();
+  const o = t.getOrigin(), q = t.getRotation();
+  return {
+    id: b.id, x: o.x(), y: o.y(), z: o.z(),
+    qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w(),
+  };
+}
 
 // Interaction state codes come from net/packets.js (shared with the client).
 export { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER };
@@ -70,7 +68,7 @@ export class RoomSim {
     this.balls = [];
     this.game = createGame(rulesetId, this.balls);
 
-    this.interact = PH_AIMING;
+    this.interact = PH_AIMING;   // set directly: setPhase is not available until construction finishes
     this.acc = 0;
     this.pocketedList = [];
     this.sunk = [];               // balls resting in pockets (kept for display, not in play)
@@ -101,7 +99,7 @@ export class RoomSim {
     this.acc = 0;
     this.rebuildBallPtrMap();
     if (this.game.isBreak()) this.startPlacement({ behindLine: true });
-    else this.interact = PH_AIMING;
+    else this.setPhase(PH_AIMING);
     return this.startInfo();
   }
 
@@ -134,6 +132,12 @@ export class RoomSim {
 
   currentPlayer() { return this.game.getState().current; }
   phase() { return this.interact; }
+
+  // The single place the interaction phase changes. Four states and a handful of
+  // transitions don't justify a state-machine table — the value is having ONE
+  // seat for assertions, logging or a future change hook, instead of six
+  // scattered assignments nobody can enumerate.
+  setPhase(next) { this.interact = next; }
 
   // A plain-data view of the table for anything that needs to REASON about the
   // position without touching the simulation — currently the shot chooser
@@ -176,7 +180,7 @@ export class RoomSim {
 
     this.game.beginShot(this.game.isBreak());
     this.rebuildBallPtrMap();
-    this.interact = PH_SHOOTING;
+    this.setPhase(PH_SHOOTING);
     this.acc = 0;
     cue.activate();
 
@@ -207,7 +211,8 @@ export class RoomSim {
   // returning, so by the time the packet leaves the server the room is
   // already in its post-shot state. Returns { packet, durationMs }.
   runShotAndRecord(shot) {
-    const frames = [this.captureFrame()];         // frame 0 is full (delta baseline)
+    const rec = createShotRecorder();
+    rec.capture(this.poses());                    // frame 0 is full (delta baseline)
     const removals = [];
     let simT = 0, frameAcc = 0, settled = false;
     while (simT < MAX_SHOT_SECONDS) {
@@ -218,7 +223,7 @@ export class RoomSim {
         frameAcc -= REPLAY_FRAME_DT;
         this.updatePocketMasks();
         this.checkPocketed();                     // sinks pocketed balls (not removed yet)
-        frames.push(this.captureFrame(true));     // delta: moving balls only
+        rec.capture(this.poses(), { delta: true });   // moving balls only
         if (this.ballsAtRest()) { settled = true; break; }
       }
     }
@@ -228,61 +233,36 @@ export class RoomSim {
     // everything to rest rather than shipping a recording that never ends.
     if (!settled) {
       console.warn('[sim] shot hit MAX_SHOT_SECONDS without settling — forcing rest.',
-        JSON.stringify({ shot, frames: frames.length, balls: this.balls.length }));
+        JSON.stringify({ shot, frames: rec.frameCount, balls: this.balls.length }));
       this.forceRest();
     }
     this.respotPending();      // everything has stopped → put off-table balls back
-    frames.push(this.captureFrame(true));   // final resting frame incl. respots + settled cups
+    // Final resting frame, including respots and balls settled in their cups.
+    const lastFrame = rec.capture(this.poses(), { delta: true });
     // The shot is over: NOW remove the pocketed balls (they've been shown dropping
     // in). The removal lands on this final frame, so their meshes clear as the
     // replay ends rather than vanishing mid-shot.
-    for (const r of this.clearSunk(frames.length - 1)) removals.push(r);
-    this.game.endShot();
-    if (this.game.isOver()) this.interact = PH_OVER;
-    else if (this.game.needsBallInHand()) this.startPlacement({ behindLine: false });
-    else this.interact = PH_AIMING;
+    for (const r of this.clearSunk(lastFrame)) removals.push(r);
+
+    // Resolve the shot and advance the phase from the DECISION the rules just
+    // returned, rather than re-interrogating the state it wrote.
+    const d = this.game.endShot();
+    if (d.over) this.setPhase(PH_OVER);
+    else if (d.ballInHand) this.startPlacement({ behindLine: false });
+    else this.setPhase(PH_AIMING);
+
     return {
-      packet: { dtMs: REPLAY_FRAME_DT * 1000, shot, frames, removals },
-      // N frames span N-1 intervals. Must match how the client measures the
-      // same recording (see makeShotPlayer in client/shotPlayer.js), or the
-      // two sides disagree about how long the shot lasts and the replay gate
-      // is computed from a different number than the one being waited on.
-      durationMs: Math.max(0, frames.length - 1) * REPLAY_FRAME_DT * 1000,
+      packet: { dtMs: REPLAY_FRAME_DT * 1000, shot, frames: rec.frames, removals },
+      durationMs: rec.durationMs,
     };
   }
 
-  // Capture a replay keyframe as independent sparse pos/rot lists. With
-  // `delta`, a ball's position is skipped if it's within POS_EPS of the last
-  // one transmitted for it, and its rotation independently within QUAT_EPS
-  // (baselines in this.sentPos/sentRot); the client carries previous values
-  // forward. Without `delta` the baselines are reset and everything is
-  // captured — frame 0 of a recording, so clients always have an absolute
-  // frame to expand deltas from.
-  captureFrame(delta = false) {
-    if (!delta) { this.sentPos = new Map(); this.sentRot = new Map(); }
-    const pos = [], rot = [];
-    for (const b of this.balls) this.captureBall(b, pos, rot);
-    for (const b of this.sunk) this.captureBall(b, pos, rot);   // balls resting in pockets
-    return { pos, rot };
-  }
-
-  captureBall(b, pos, rot) {
-    const t = b.body.getWorldTransform();
-    const o = t.getOrigin(), q = t.getRotation();
-    const p = { id: b.id, x: o.x(), y: o.y(), z: o.z() };
-    const lp = this.sentPos.get(b.id);
-    if (!lp || Math.abs(p.x - lp.x) >= POS_EPS || Math.abs(p.y - lp.y) >= POS_EPS
-            || Math.abs(p.z - lp.z) >= POS_EPS) {
-      this.sentPos.set(b.id, p);
-      pos.push(p);
-    }
-    const r = { id: b.id, qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w() };
-    const lr = this.sentRot.get(b.id);
-    if (!lr || Math.abs(r.qx - lr.qx) >= QUAT_EPS || Math.abs(r.qy - lr.qy) >= QUAT_EPS
-            || Math.abs(r.qz - lr.qz) >= QUAT_EPS || Math.abs(r.qw - lr.qw) >= QUAT_EPS) {
-      this.sentRot.set(b.id, r);
-      rot.push(r);
-    }
+  // Every ball's pose as a plain object, in the order the recorder wants:
+  // in-play balls first, then those resting in pockets (still streamed until
+  // they are removed at the end of the shot).
+  *poses() {
+    for (const b of this.balls) yield pose(b);
+    for (const b of this.sunk) yield pose(b);
   }
 
   applyPlaceMove(playerIdx, x, z) {
@@ -296,7 +276,7 @@ export class RoomSim {
 
   applyPlaceConfirm(playerIdx) {
     if (playerIdx !== this.currentPlayer() || this.interact !== PH_PLACING) return false;
-    this.interact = PH_AIMING;
+    this.setPhase(PH_AIMING);
     return true;
   }
 
@@ -485,7 +465,7 @@ export class RoomSim {
   }
 
   startPlacement({ behindLine = false } = {}) {
-    this.interact = PH_PLACING;
+    this.setPhase(PH_PLACING);
     this.placeBehindLine = behindLine;
     this.placeBounds = computeBounds(behindLine);
     // Start the placement from wherever the cue ball was left, not a fixed

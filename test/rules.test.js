@@ -254,7 +254,22 @@ test('9ball: driving a ball off the table is a foul', () => {
 
 test('endShot on a game with no shot in progress is inert', () => {
   const game = createGame('8ball', table(1, 8));
-  assert.deepEqual(game.endShot(), { over: false });
+  // ballInHand must be present and false: the sim branches on it to pick the
+  // next phase, so an undefined here would silently mean "no ball in hand".
+  assert.deepEqual(game.endShot(), { over: false, ballInHand: false });
+});
+
+test('endShot reports ballInHand so the caller can drive its own phase', () => {
+  const foul = play('9ball', table(1, 9), null, legal(2));
+  assert.equal(foul.result.ballInHand, true, 'a foul must report ball in hand');
+  assert.equal(foul.result.ballInHand, foul.match.ballInHand, 'and agree with the match state');
+
+  const clean = play('9ball', table(1, 9), null, legal(1));
+  assert.equal(clean.result.ballInHand, false);
+
+  const won = play('9ball', table(1, 9), null, legal(1, { pocketed: [9] }));
+  assert.equal(won.result.over, true);
+  assert.equal(won.result.ballInHand, false, 'a finished game never hands out ball in hand');
 });
 
 test('a foul sets ball in hand; a clean miss does not', () => {

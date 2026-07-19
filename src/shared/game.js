@@ -70,9 +70,13 @@ export function createGame(rulesetId, balls = []) {
   }
 
   // --- Shot resolution -----------------------------------------------------
+  // Returns the decision the caller needs to advance its own state:
+  // { over, winner?, foul, turnPasses, ballInHand, reason }. `ballInHand`
+  // matters because the sim drives its phase transition off this return value
+  // rather than re-reading the state it just wrote.
   function endShot() {
     const s = match.shot;
-    if (!s) return { over: false };
+    if (!s) return { over: false, ballInHand: false };
 
     const d = ruleset.resolve(s, match) || {};
     match.shot = null;
@@ -82,7 +86,7 @@ export function createGame(rulesetId, balls = []) {
       match.winner = d.winner;
       match.ballInHand = false;
       match.message = d.message || `${match.players[d.winner].name} wins.`;
-      return { over: true, winner: d.winner };
+      return { over: true, winner: d.winner, ballInHand: false };
     }
 
     const turnPasses = !!d.foul || !d.continues;
@@ -90,7 +94,10 @@ export function createGame(rulesetId, balls = []) {
     match.ballInHand = d.ballInHand ?? !!d.foul;
     match.message = d.message || '';
 
-    return { over: false, foul: !!d.foul, turnPasses, reason: d.reason };
+    return {
+      over: false, foul: !!d.foul, turnPasses,
+      ballInHand: match.ballInHand, reason: d.reason,
+    };
   }
 
   function reset() {
