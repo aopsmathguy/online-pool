@@ -121,6 +121,17 @@ function replayLocked(room) {
   return !!room.replayUntil && Date.now() < room.replayUntil;
 }
 
+// The room's current state, in the shape a shot's `post` carries. Used both
+// when a shot resolves and when a backlog's final shot has to hand the client
+// the present (see resumeSeat).
+function presentPost(sim) {
+  return {
+    state: sim.gameStatePacket(),
+    balls: sim.ballsFrame(),
+    placing: sim.placingPacket(),
+  };
+}
+
 // A shot as the review list sees it: enough to label the entry in the dropdown,
 // without the recording that makes it heavy.
 function shotMeta(s) {
@@ -221,11 +232,7 @@ function performShot(room, playerIdx, params) {
   // frame of the recording and is what the client shows until the replay ends.
   // The client applies all of this when playback finishes, so nothing about the
   // outcome can arrive early and nothing has to be queued.
-  anim.packet.post = {
-    state: room.sim.gameStatePacket(),
-    balls: room.sim.ballsFrame(),
-    placing: room.sim.placingPacket(),   // .active is false unless it's ball-in-hand
-  };
+  anim.packet.post = presentPost(room.sim);   // placing.active is false unless ball-in-hand
   room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
   trimShotLog(room);
   broadcast(room, 'shotAnim', anim.packet);
@@ -337,14 +344,28 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   }
   // The backlog, in full: these have to be played, so the client needs them.
   // Bounded by the reconnect grace — a few shots, not a rack.
-  for (const s of missed) conn.socket.emit('shotAnim', s.packet);
+  //
+  // The LAST one carries the present as its `post`, and no reconcile packets
+  // follow. That is not an optimisation, it is the invariant: a client applies
+  // `post` when playback ENDS, but a bare balls/gameState the moment it lands.
+  // Sending the current state alongside a backlog would delete the very ball
+  // the client is about to watch being pocketed, and list it as already potted,
+  // while the replay is still running. State only reaches a replaying client
+  // through the shot it belongs to.
+  //
+  // Overriding the tail's own post (rather than appending) also picks up
+  // anything that moved after the last shot — a placement drag, say.
+  missed.forEach((s, i) => {
+    const isLast = i === missed.length - 1;
+    conn.socket.emit('shotAnim', isLast ? { ...s.packet, post: presentPost(sim) } : s.packet);
+  });
 
-  // Reconcile to the present. The last shot's `post` usually covers this, but
-  // state can move after it (a placement drag, a newGame), so send it anyway —
-  // it is idempotent. To this socket alone; the opponent is already up to date.
-  conn.socket.emit('balls', sim.ballsFrame());
-  conn.socket.emit('gameState', sim.gameStatePacket());
-  if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());
+  // No backlog: nothing is going to play, so the present can be sent directly.
+  if (!missed.length) {
+    conn.socket.emit('balls', sim.ballsFrame());
+    conn.socket.emit('gameState', sim.gameStatePacket());
+    if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());
+  }
 
   // If we're resuming into the OPPONENT's aiming turn, hand over the pose their
   // cue stick is currently in. Without this the spectated stick sits at its
