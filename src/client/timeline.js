@@ -127,7 +127,17 @@ export function createTimeline({
       if (state.interact !== PH_PLACING) live.placing = null;
     }
     if (balls) live.balls = balls;
-    if (placing) live.placing = placing;
+    if (placing) {
+      live.placing = placing;
+      // Keep live.balls in step. Placement moves the cue ball but the server
+      // sends no `balls` packet for it, so the stored set still has the ball
+      // where the last shot left it. renderLive() syncs the rack from that set
+      // on every adopt, so without this the ball snaps back to its old spot the
+      // moment placement ends (placeConfirm sends gameState alone) — and then
+      // jumps to where it was actually placed when the shot's frame 0 lands.
+      const cue = live.balls && live.balls.items.find(b => b.id === 0);
+      if (cue) { cue.x = placing.x; cue.z = placing.z; }
+    }
     if (isLive()) renderLive();
   }
   const setLiveState = (state) => adoptLive({ state });

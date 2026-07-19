@@ -122,6 +122,7 @@ let input = null;
 // V-key cycles the camera preference: 'aim' (down the stick) → 'free'
 // (fly-around) → 'top' (overhead). Resolved against game state each frame.
 let camPref = 'aim';
+let shotFallback = null;   // releases the drawn stick if a shot never lands
 let ballCount = 15;         // object balls in play (15 for 8-ball, 9 for 9-ball)
 const railPoints = densify(rail_pts(tableW, tableH));   // sampled rail for cue-clearance
 
@@ -165,9 +166,17 @@ function buildScene() {
       socket.emit('placeMove', { x: localPlace.x, z: localPlace.z });
     },
     onShoot: (pull) => {
-      if (!(gs.interact === PH_AIMING && myTurn())) return;
+      if (!(gs.interact === PH_AIMING && myTurn())) { setPullback(0); return; }
       const s = getStrikeOffset();
       socket.emit('shoot', { yaw: getYaw(), pitch: getPitch(), strikeX: s.x, strikeY: s.y, power: pull });
+      // input.js leaves the stick drawn so the replay's lead-in continues from
+      // it seamlessly. If no recording ever arrives — the server can refuse a
+      // shot that races its own replay gate — nothing else would ever put the
+      // stick down, so release it after a beat.
+      clearTimeout(shotFallback);
+      shotFallback = setTimeout(() => {
+        if (isLive() && gs.interact === PH_AIMING && myTurn()) setPullback(0);
+      }, 3000);
     },
   });
 
@@ -339,7 +348,12 @@ function applyGameState(state) {
   // fail here instead of a player noticing a spoiled shot weeks later.
   assertLive('gameState');
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
+  const wasPlacing = gs.interact === PH_PLACING;
   gs = state;
+  // Ball-in-hand is a whole-table decision, so start it overhead — for either
+  // player, since watching someone place is table-wide too. A NUDGE, not a
+  // lock: V still cycles to any view and nothing forces it back.
+  if (gs.interact === PH_PLACING && !wasPlacing) camPref = 'top';
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
   placeBotSlider();               // re-attach the difficulty slider to the bot chip
   if (gs.winner >= 0) { $('sideMenu').classList.remove('collapsed'); openReviewPanel(); }   // game over → surface the replay controls

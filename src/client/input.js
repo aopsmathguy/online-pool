@@ -162,8 +162,13 @@ export function bindInput(canvas, handlers) {
     drag = null; dragId = null;
     if (mode === 'power') {
       const pull = getPullback();
-      setPullback(0);
-      if (pull > 0.001) onShoot(pull);
+      // Deliberately NOT reset here. The shot is away but the recording has to
+      // come back before anything can be shown, and snapping the stick to rest
+      // in that gap only to replay the same draw-back a moment later reads as a
+      // stutter. Leaving it drawn means the replay's lead-in (which opens at
+      // full draw and holds) continues from exactly where the player let go.
+      // onShoot arranges the fallback if no shot ever materialises.
+      if (pull > 0.001) onShoot(pull); else setPullback(0);
     }
     // 'place' just drops the drag — placement is finalised by the ✓ button.
   }

@@ -87,8 +87,11 @@ export function makeShotPlayer(anim, { animateStick = true, strikeMs = STRIKE_MS
         return;
       }
       // Past the strike the stick is gone for the rest of the shot — same as
-      // watching an opponent live.
-      if (lead > 0) setCueVisible(false);
+      // watching an opponent live. Pullback goes fully to zero with it: the
+      // last poseStick call lands just short of the end of the thrust, so
+      // without this the power meter keeps showing a few percent all through
+      // the shot.
+      if (lead > 0) { setCueVisible(false); setPullback(0); }
 
       const last = frames.length - 1;
       let tf = (t - lead) / anim.dtMs;
