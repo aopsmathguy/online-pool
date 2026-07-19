@@ -12,16 +12,25 @@ import { snapshotRack, syncRack } from './balls.view.js';
 import { setVisible as setCueVisible } from './cue.js';
 import { makeShotPlayer, openingBalls } from './shotPlayer.js';
 
-const history = [];            // { anim } per completed shot, in order
+// One entry per completed shot, in order. `anim` is the recording — null for a
+// shot restored after a reconnect, where only the label metadata was sent and
+// the recording is fetched on demand (see enter/provideShot). Everything the
+// dropdown renders lives on the entry itself, so a placeholder looks the same.
+const history = [];            // { anim|null, index, shooter, pocketedBefore, removals }
 let numberById = new Map();    // id -> number|null for THIS game (fixed per rack)
 let reviewing = false;
 let liveSnapshot = null;       // the live table, saved on entry / restored on exit
 let cur = null;                // { anim, index, duration, t, playing } while a shot is loaded
 let lastNow = 0;               // for per-frame dt while playing
 let els = null;
+let fetchShot = null;          // (rackIndex) => void — ask the server for a recording
+let pendingSlot = -1;          // history slot waiting on a fetch
 
 // Wire the DOM once (called from buildScene). Safe to call before any shot.
-export function initReview() {
+// `onNeedShot(rackIndex)` is called when the player opens a shot whose
+// recording we don't hold; feed the result back through provideShot.
+export function initReview({ onNeedShot } = {}) {
+  fetchShot = onNeedShot || null;
   els = {
     panel:   document.getElementById('replayPanel'),
     toggle:  document.getElementById('replayToggle'),
@@ -92,8 +101,33 @@ export function numberForBallId(id) {
 // the name of the player who took the shot, and the pocketed set BEFORE it (so
 // the pocketed HUD can be rebuilt correctly as balls drop during the review).
 export function recordShot(anim, shooter, pocketedBefore) {
-  history.push({ anim, shooter: shooter || 'Player', pocketedBefore: (pocketedBefore || []).slice() });
+  history.push({
+    anim, index: anim.index,
+    shooter: shooter || 'Player',
+    pocketedBefore: (pocketedBefore || []).slice(),
+    removals: anim.removals || [],
+  });
   refreshSelect();
+}
+
+// A shot restored after a reconnect: label only, recording fetched on demand.
+export function recordShotMeta(m) {
+  history.push({
+    anim: null, index: m.index,
+    shooter: m.shooter || 'Player',
+    pocketedBefore: (m.pocketedBefore || []).slice(),
+    removals: m.removals || [],
+  });
+  refreshSelect();
+}
+
+// A requested recording arrived. Fill its slot, and open it if that is what the
+// player was waiting on.
+export function provideShot(anim) {
+  const slot = history.findIndex(h => h.index === anim.index);
+  if (slot < 0) return;
+  history[slot].anim = anim;
+  if (pendingSlot === slot) { pendingSlot = -1; enter(slot); }
 }
 
 // The pocketed numbers as of the start of the loaded review shot (union with
@@ -107,7 +141,7 @@ export function reviewHistory() { return history; }
 // any. Pocketed balls are exactly the anim's removals (the cue never appears —
 // a scratch respots it rather than removing it); map their ids to numbers.
 function shotLabel(h, i) {
-  const sunk = (h.anim.removals || [])
+  const sunk = (h.removals || [])
     .map(r => numberById.get(r.id))
     .filter(n => n != null)
     .sort((a, b) => a - b);
@@ -121,6 +155,7 @@ export function resetReview() {
   if (reviewing) exit();
   history.length = 0;
   cur = null;
+  pendingSlot = -1;
   refreshSelect();
 }
 
@@ -141,6 +176,16 @@ export function reviewTick(now) {
 function enter(i) {
   const h = history[i];
   if (!h) return;
+  // Restored shot: we have the label but not the recording. Ask for it and
+  // pick this back up in provideShot. Staying OUT of review mode until it
+  // lands means a failed or slow fetch leaves the live table alone.
+  if (!h.anim) {
+    pendingSlot = i;
+    els.select.value = String(i);
+    els.time.textContent = 'Loading…';
+    if (fetchShot) fetchShot(h.index);
+    return;
+  }
   if (!reviewing) { liveSnapshot = snapshotRack(); reviewing = true; }
   // Rebuild the rack to this shot's opening frame, matching numbers to ids.
   const frame0 = openingBalls(h.anim);

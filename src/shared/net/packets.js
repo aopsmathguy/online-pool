@@ -43,6 +43,10 @@ export const packetSchemas = {
   // the next shotAnim this client still needs, so the server can replay
   // everything it missed while away.
   resume:       { token: 'string', lastShot: 'uint16' },
+  // Fetch one past shot's full recording, by its index in the current rack.
+  // Sent when the player opens a shot in the review list that they watched
+  // before dropping — see shotHistory.
+  requestShot:  { index: 'uint16' },
 
   // ---- Server → Client ----
   // `token` identifies this SEAT (not the socket) for the lifetime of the room;
@@ -100,6 +104,17 @@ export const packetSchemas = {
                   history: 'boolean',
                   // `placing.active` is false unless the shot ended in ball-in-hand.
                   post: { state: GAME_STATE, balls: BALLS, placing: PLACING } },
+  // The rack's shot list WITHOUT the recordings — everything the review
+  // dropdown renders (who shot, what they sank) and nothing else. Sent on
+  // resume to rebuild the list, because re-entering the rack clears it.
+  //
+  // Recordings are far too big to push speculatively: ~83 KB encoded on
+  // average and up to 827 KB for a break, so a full rack is over a megabyte —
+  // ten seconds at 1 Mbps, on the flaky link that just dropped you. The client
+  // asks for one (requestShot) only when the player actually opens it.
+  shotHistory:  { shots: [ { index: 'uint16', shooter: 'string',
+                             pocketedBefore: [ 'uint8' ],
+                             removals: [ { id: 'uint8', frame: 'uint16' } ] } ] },
   gameState:    GAME_STATE,
   placing:      PLACING,
   aimState:     { yaw: 'float32', pitch: 'float32', strikeX: 'float32', strikeY: 'float32', pullback: 'float32' },

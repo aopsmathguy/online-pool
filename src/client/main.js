@@ -25,7 +25,7 @@ import { legalPitch, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
-  initReview, recordShot, resetReview, setReviewLayout, isReviewing, reviewTick,
+  initReview, recordShot, recordShotMeta, provideShot, resetReview, setReviewLayout, isReviewing, reviewTick,
   reviewCueAnchor, openReviewPanel, reviewPocketedBaseline, numberForBallId, reviewHistory,
 } from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
@@ -134,7 +134,9 @@ function buildScene() {
   const { canvas, scene } = initScene();
   stageCanvas = canvas;
   initHud(document.getElementById('hudCanvas'));   // 2D overlay HUD (spin/power/view/pocketed)
-  initReview();                                    // collapsible past-shot video player
+  // Collapsible past-shot video player. Shots restored after a reconnect
+  // arrive as labels only; this is how it pulls a recording when one is opened.
+  initReview({ onNeedShot: (index) => socket.emit('requestShot', { index }) });
 
   const railPoints = rail_pts(tableW, tableH);
   const feltPoints = felt_pts(tableW, tableH);
@@ -351,12 +353,16 @@ function applyPlacing(p) {
 // deferral, no queue, no ordering to get right.
 socket.on('gameState', applyGameState);
 socket.on('placing', applyPlacing);
-// A history shot is one this client already watched before it dropped: the
-// server resends it so the review list comes back whole. File it, don't play it.
+// history = a recording we asked for (requestShot) to review a shot watched
+// before we dropped. File it against its placeholder; never play it.
 socket.on('shotAnim', (anim) => {
-  if (anim.history) recordShot(anim, anim.shooter, anim.pocketedBefore);
+  if (anim.history) provideShot(anim);
   else replay.push(anim);
 });
+
+// The rack's shot list, labels only — sent on resume, since re-entering the
+// rack clears the review list. Recordings are fetched per shot on demand.
+socket.on('shotHistory', ({ shots }) => { for (const m of shots) recordShotMeta(m); });
 // The authoritative ball set, not just positions: reconcile the rack to match
 // exactly. This is what stops a ghost ball surviving past a shot — whatever the
 // client got up to during playback, this puts it back in agreement.

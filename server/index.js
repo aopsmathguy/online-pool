@@ -121,6 +121,17 @@ function replayLocked(room) {
   return !!room.replayUntil && Date.now() < room.replayUntil;
 }
 
+// A shot as the review list sees it: enough to label the entry in the dropdown,
+// without the recording that makes it heavy.
+function shotMeta(s) {
+  return {
+    index: s.index,
+    shooter: s.packet.shooter,
+    pocketedBefore: s.packet.pocketedBefore,
+    removals: s.packet.removals,
+  };
+}
+
 // Bound the log. startMatch clears it, so this only bites on a rack that runs
 // past MAX_SHOT_LOG shots; the oldest go first, and a client that resumes then
 // simply sees a shorter review list.
@@ -299,11 +310,19 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   // not played.
   const alreadyWatched = room.shotLog.filter(s => s.index < from);
 
-  // Build the rack from the table as it stood at the START of the backlog, not
-  // as it stands now: the balls sunk during those missed shots must exist as
-  // meshes so the replay can show them being pocketed. The trailing `balls` +
-  // `gameState` below reconcile to the present once the backlog finishes.
-  const info = (missed.length && missed[0].preLayout) || sim.startInfo();
+  // Build the rack from the table as it stood at the start of the EARLIEST
+  // retained shot, not as it stands now. Two reasons:
+  //
+  //  - balls sunk during the missed shots must exist as meshes so the replay
+  //    can show them being pocketed;
+  //  - this layout also fixes the client's id -> number map for the whole rack
+  //    (setReviewLayout). Using the current ball set would drop every ball
+  //    already pocketed, and the review list could no longer name what a past
+  //    shot sank — "Shot 2 · Computer · sank 9" would come back as
+  //    "Shot 2 · Computer".
+  //
+  // The trailing `balls` + `gameState` below reconcile to the present.
+  const info = (room.shotLog.length && room.shotLog[0].preLayout) || sim.startInfo();
   conn.socket.emit('startGame', { game: gameByteFromId(info.game), firstPlayer: info.firstPlayer, layout: info.layout });
 
   // The HUD state as it stood when the backlog begins. Each shot then carries
@@ -311,8 +330,13 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   // no interleaving of state packets with recordings, and no ordering contract
   // between this loop and the client's replay queue.
   conn.socket.emit('gameState', (missed.length && missed[0].pre) || sim.gameStatePacket());
-  // Rebuild the review list first, then hand over the backlog to actually play.
-  for (const s of alreadyWatched) conn.socket.emit('shotAnim', { ...s.packet, history: true });
+  // Rebuild the review list from METADATA — labels only, no recordings. The
+  // client fetches a recording (requestShot) if the player opens that shot.
+  if (alreadyWatched.length) {
+    conn.socket.emit('shotHistory', { shots: alreadyWatched.map(shotMeta) });
+  }
+  // The backlog, in full: these have to be played, so the client needs them.
+  // Bounded by the reconnect grace — a few shots, not a rack.
   for (const s of missed) conn.socket.emit('shotAnim', s.packet);
 
   // Reconcile to the present. The last shot's `post` usually covers this, but
@@ -431,6 +455,16 @@ function handleConnection(socket) {
     const room = conn.room;
     if (!room || !room.sim) return;
     if (room.sim.applyPlaceConfirm(conn.index)) broadcastPhase(room);   // interact → aiming
+  });
+
+  // The player opened a past shot in the review list that they watched before
+  // dropping, so only its metadata is on the client. Hand over the recording.
+  socket.on('requestShot', ({ index }) => {
+    const room = conn.room;
+    if (!room) return;
+    const s = room.shotLog.find(x => x.index === index);
+    if (!s) return;   // trimmed out of the window; the client keeps its label
+    conn.socket.emit('shotAnim', { ...s.packet, history: true });
   });
 
   // Reclaim a held seat after a drop/reload, and get replayed what was missed.
