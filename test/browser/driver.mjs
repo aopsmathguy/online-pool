@@ -62,10 +62,24 @@ export async function launch({ query = '', width = 1280, height = 800 } = {}) {
     `http://localhost:${port}/${query}`,
   ], { stdio: 'ignore' });
 
-  const page = await connectPage(cdpPort, 20_000);
+  const consoleLines = [];
+  const page = await connectPage(cdpPort, 20_000, consoleLines);
+
+  // Console output is captured (see connectPage).
+  //
+  // window.__errors only catches window.onerror, which misses the failure mode
+  // this codebase is most prone to: socketUtility wraps every packet handler in
+  // a try/catch and logs the result as "Packet doesn't fit schema". A plain
+  // ReferenceError in a handler therefore leaves NO trace a test can see — the
+  // handler simply stops half way and the game quietly never starts. That
+  // exact bug once wedged a full suite run with a green-looking page.
+
 
   const handle = {
-    port, cdpPort, profile, serverLog,
+    port, cdpPort, profile, serverLog, consoleLines,
+    /** Console lines that look like a real problem, not ordinary chatter. */
+    consoleProblems: () => consoleLines.filter(l =>
+      /Packet doesn't fit schema|is not defined|is not a function|Uncaught|TypeError|ReferenceError/.test(l)),
     evaluate: page.evaluate,
     /**
      * Poll `expr` until it is truthy. Returns its value; throws on timeout.
@@ -134,7 +148,7 @@ async function waitForHttp(port, timeout) {
 }
 
 // Attach to the page target and expose a promise-based Runtime.evaluate.
-async function connectPage(cdpPort, timeout) {
+async function connectPage(cdpPort, timeout, consoleLines = []) {
   const deadline = Date.now() + timeout;
   let target = null;
   while (Date.now() < deadline && !target) {
@@ -154,13 +168,30 @@ async function connectPage(cdpPort, timeout) {
   ws.on('message', (m) => {
     const msg = JSON.parse(m);
     const done = pending.get(msg.id);
-    if (done) { pending.delete(msg.id); done(msg); }
+    if (done) { pending.delete(msg.id); done(msg); return; }
+    // Console + uncaught exceptions, so a swallowed handler throw is visible.
+    if (msg.method === 'Runtime.consoleAPICalled') {
+      const text = (msg.params.args || [])
+        .map(a => a.value ?? a.description ?? a.unserializableValue ?? '')
+        .join(' ');
+      consoleLines.push(`[${msg.params.type}] ${text}`);
+    } else if (msg.method === 'Runtime.exceptionThrown') {
+      const d = msg.params.exceptionDetails;
+      consoleLines.push(`[exception] ${d.text} ${d.exception?.description || ''}`);
+    }
   });
   const send = (method, params = {}) => new Promise((res) => {
     const n = ++id;
     pending.set(n, res);
     ws.send(JSON.stringify({ id: n, method, params }));
   });
+
+  // Console/exception events only arrive once Runtime is enabled.
+  const enable = () => new Promise((res) => {
+    const n = ++id; pending.set(n, res);
+    ws.send(JSON.stringify({ id: n, method: 'Runtime.enable', params: {} }));
+  });
+  await enable();
 
   const evaluate = async (expression) => {
     const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });

@@ -20,14 +20,13 @@ import {
   buildRack, syncRack, setCuePosition,
   getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
 } from './balls.view.js';
-import { createReplayQueue } from './replayQueue.js';
+import { createTimeline } from './timeline.js';
 import { legalPitch, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
-  initReview, recordShot, recordShotMeta, provideShot, resetReview, setReviewLayout, isReviewing, reviewTick,
-  reviewCueAnchor, openReviewPanel, reviewPocketedBaseline, numberForBallId, reviewHistory,
-  reviewChromeHeight,
+  initReview, setReviewLayout, numberForBallId, openReviewPanel,
+  render as renderReviewUi, reviewChromeHeight,
 } from './shotReview.js';
 import { SocketClient } from '../../lib/socketUtility.js';
 import {
@@ -123,7 +122,6 @@ let input = null;
 // V-key cycles the camera preference: 'aim' (down the stick) → 'free'
 // (fly-around) → 'top' (overhead). Resolved against game state each frame.
 let camPref = 'aim';
-let wasReviewing = false;   // to restore the win banner when review ends
 let ballCount = 15;         // object balls in play (15 for 8-ball, 9 for 9-ball)
 const railPoints = densify(rail_pts(tableW, tableH));   // sampled rail for cue-clearance
 
@@ -135,9 +133,7 @@ function buildScene() {
   const { canvas, scene } = initScene();
   stageCanvas = canvas;
   initHud(document.getElementById('hudCanvas'));   // 2D overlay HUD (spin/power/view/pocketed)
-  // Collapsible past-shot video player. Shots restored after a reconnect
-  // arrive as labels only; this is how it pulls a recording when one is opened.
-  initReview({ onNeedShot: (index) => socket.emit('requestShot', { index }) });
+  initReview(timeline);   // shot list + transport bar, driving the playhead
 
   const railPoints = rail_pts(tableW, tableH);
   const feltPoints = felt_pts(tableW, tableH);
@@ -152,11 +148,12 @@ function buildScene() {
   initCueStick();
 
   input = bindInput(canvas, {
-    // !replaying() also covers catching up after a reconnect: while the missed
+    // isLive() covers everything at once: a live shot playing, a reconnect
+    // backlog draining, and a past shot being reviewed. While the playhead is
     // shots play out, `gs` still describes the state before them, so acting on
     // it would aim at stale ball positions.
-    isReady:  () => net.inGame && net.connected && !replaying() && !isReviewing() && gs.interact === PH_AIMING && myTurn(),
-    isPlacing: () => net.inGame && net.connected && !replaying() && !isReviewing() && gs.interact === PH_PLACING && myTurn(),
+    isReady:  () => net.inGame && net.connected && isLive() && gs.interact === PH_AIMING && myTurn(),
+    isPlacing: () => net.inGame && net.connected && isLive() && gs.interact === PH_PLACING && myTurn(),
     onToggleView: cycleView,                            // V: cycle aim → free → top
     onZoom: (deltaY) => zoomCamera(deltaY),            // scroll: dolly the camera
     isOverCueBall,
@@ -230,7 +227,7 @@ $('btnJoin').addEventListener('click',   () => {
 // Leaving is deliberate: drop the session too, so a later reload goes to the
 // menu instead of trying to resume a game we walked away from.
 $('btnLeaveLobby').addEventListener('click', () => { socket.emit('leaveRoom', {}); saveSession(null); showMenu(); });
-$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); saveSession(null); cancelReplay(); resetReview(); clearRack(); showMenu(); });
+$('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}); saveSession(null); timeline.reset(); clearRack(); showMenu(); });
 $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game: 255 }));
 
 // ---- Shot replay --------------------------------------------------------------
@@ -240,29 +237,41 @@ $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game
 // A `shotAnim` is self-contained: keyframes from strike to rest, plus `post` —
 // the state the shot resolved to. So the outcome cannot arrive before you have
 // watched the shot, and there is nothing to defer.
-const replay = createReplayQueue({
-  // Replay frames carry only ids; the rack needs numbers to texture a mesh. The
-  // id→number map for this rack is fixed at startGame (shotReview owns it).
-  syncRack: (balls) => syncRack(balls.map(b => ({ ...b, number: numberForBallId(b.id) }))),
-  applyPost: ({ state, balls, placing }) => {
-    applyGameState(state);
-    syncRack(balls.items);
-    if (placing.active) applyPlacing(placing);
-  },
-  // Attribution comes off the packet, not off live state: it is correct for a
-  // shot restored into the review list on resume, where there is no matching
-  // live state, and it drops the live path's reliance on `gs` still holding the
-  // PRE-shot value at the instant playback begins.
-  onShotStart: (anim) => recordShot(anim, anim.shooter, anim.pocketedBefore),
-  onShotEnd: (index) => noteShotWatched(index),   // a reload now resumes AFTER this shot
-  onIdle: () => drainDeferredState(),            // back live: adopt anything held
-  isReviewing,
+// The one thing that decides what is on screen. Live play, catching up after a
+// reconnect and reviewing a past shot are the same playhead at different
+// positions — see timeline.js.
+const timeline = createTimeline({
+  // Replay frames carry only ids; a mesh needs the number to be textured.
+  // Replay frames carry only ids; a mesh needs the number to be textured.
+  syncRack: (balls) => syncRack(balls.map(b => (b.number === undefined
+    ? { ...b, number: numberForBallId(b.id) } : b))),
+  showState: applyGameState,
+  showPlacing: applyPlacing,
   hideCue: () => setCueVisible(false),
+  onChange: () => { renderReviewUi(); noteWatched(); },
+  fetchShot: (index) => socket.emit('requestShot', { index }),
 });
 
-const drawingBack = () => replay.drawingBack();
-const replaying = () => replay.isPlaying();
-const cancelReplay = () => replay.cancel();
+// A shot is "watched" once the playhead has passed it, so a reload mid-replay
+// replays it from the start rather than skipping it.
+function noteWatched() {
+  const entries = timeline.entries();
+  for (const e of entries) if (e.watched && e.anim) noteShotWatched(e.index);
+}
+
+const isLive = () => timeline.isLive();
+const drawingBack = () => timeline.drawingBack();
+
+// Complain loudly (never throw — socketUtility swallows handler exceptions and
+// reports them all as "Packet doesn't fit schema", which is how a real bug once
+// hid for the life of the project). The push is what test/browser/ asserts on.
+function assertLive(what) {
+  if (timeline.isLive()) return;
+  const msg = `state-during-replay:${what}`;
+  console.error(`[pool] ${msg} — the playhead is showing a past shot, so this `
+    + `would reveal the outcome before the shot.`);
+  window.__errors.push(msg);
+}
 
 // ---- Server events ----------------------------------------------------------
 socket.on('errorMsg', ({ message }) => {
@@ -293,13 +302,13 @@ socket.on('lobby', ({ state, players }) => {
 
 socket.on('startGame', ({ game, layout }) => {
   buildScene();
-  cancelReplay();
   resetTopPan();             // recenter overhead for the new game
   // Pocketed-column length. Taken from the ruleset, NOT from the layout's
   // highest number: a resume rebuilds the rack from the balls still on the
   // table, so the top ball may already be gone.
   ballCount = game === GAME_9BALL ? 9 : 15;
-  setReviewLayout(layout);   // fix id→number for this rack; clears past-game shots
+  setReviewLayout(layout);   // fix id→number for this rack
+  timeline.reset();          // a new rack: drop the previous one's shots
   buildRack(layout);
   if (net.resuming) {
     // Resuming into the SAME rack: keep the watched-shot counter. Zeroing it
@@ -324,6 +333,13 @@ socket.on('startGame', ({ game, layout }) => {
 // Called for live states and, via a shot's own `post`, when a replay ends — so
 // the top bar tracks a replayed shot the same way it tracks a live one.
 function applyGameState(state) {
+  // The invariant, still asserted even though the timeline now makes it
+  // structural: present-tense state must never reach the screen while the
+  // playhead is showing the past. renderLive() is the only caller and it is
+  // guarded by isLive(), so this cannot fire — which is exactly why it is worth
+  // keeping. If a future change calls this directly again, the browser tests
+  // fail here instead of a player noticing a spoiled shot weeks later.
+  assertLive('gameState');
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
   gs = state;
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
@@ -344,6 +360,7 @@ function applyGameState(state) {
 // Adopt a ball-in-hand state. Also reached via a shot's `post` when the shot
 // ended in a foul.
 function applyPlacing(p) {
+  assertLive('placing');
   gs.interact = PH_PLACING;
   gs.current = p.player;
   if (p.player === net.myIndex) { localPlace.x = p.x; localPlace.z = p.z; }
@@ -359,61 +376,28 @@ function applyPlacing(p) {
 // pocketed. State must ride on the shot it belongs to (`post`), never arrive
 // alongside it.
 //
-// Normally nothing state-bearing arrives mid-replay, because a shot's outcome
-// rides on the shot. But the server's replay gate (replayLocked) is a WALL-CLOCK
-// ESTIMATE of when clients finish watching — a slow machine, a throttled tab or
-// a long frame can outlast it, and then a legitimate broadcast (an opponent
-// starting their ball-in-hand drag the moment the gate clears) lands early. No
-// server-side timing can close that; only the client knows when its replay ends.
-//
-// So the client refuses: hold the packet, apply it when playback goes idle.
-// Last-write-wins per packet type, not a queue of side effects to replay in
-// order — that distinction is what made the old afterReplay queue fragile.
-// This is a safety net for the racy edge, NOT the mechanism: if it starts
-// carrying the common case, something has regressed to sending state alongside
-// shots instead of inside them.
-const deferredState = new Map();   // packet name -> latest payload
-const handlers = new Map();        // packet name -> handler
-
-const whenLive = (name, fn) => {
-  handlers.set(name, fn);
-  return (data) => {
-    if (replay.isPlaying()) {
-      deferredState.set(name, data);
-      window.__errors.push(`state-deferred:${name}`);   // observed by test/browser/
-      return;
-    }
-    fn(data);
-  };
-};
-
-// Playback finished — adopt anything held, in arrival order.
-function drainDeferredState() {
-  if (!deferredState.size) return;
-  const held = [...deferredState.entries()];
-  deferredState.clear();
-  for (const [name, data] of held) handlers.get(name)(data);
-}
-
-// These arrive between shots (a new rack, a placement drag, a resume reconcile),
-// never during one — a shot's outcome rides inside the shot itself. No
-// deferral, no queue, no ordering to get right.
-socket.on('gameState', whenLive('gameState', applyGameState));
-socket.on('placing', whenLive('placing', applyPlacing));
+// State packets are STORED as the newest server truth, not applied. The
+// timeline renders them once the playhead is live, so one arriving while a
+// replay is on screen cannot show the outcome before the shot — the bug this
+// codebase kept producing. Nothing to defer, queue or order.
+socket.on('gameState', (state) => timeline.setLiveState(state));
+socket.on('placing', (p) => timeline.setLivePlacing(p));
 // history = a recording we asked for (requestShot) to review a shot watched
 // before we dropped. File it against its placeholder; never play it.
 socket.on('shotAnim', (anim) => {
-  if (anim.history) provideShot(anim);
-  else replay.push(anim);
+  // history = a recording we asked for, to review a shot watched before we
+  // dropped. It fills its slot in the log; it is never queued for playback.
+  if (anim.history) timeline.provide(anim);
+  else timeline.appendShot(anim);
 });
 
 // The rack's shot list, labels only — sent on resume, since re-entering the
 // rack clears the review list. Recordings are fetched per shot on demand.
-socket.on('shotHistory', ({ shots }) => { for (const m of shots) recordShotMeta(m); });
+socket.on('shotHistory', ({ shots }) => { for (const m of shots) timeline.appendMeta(m); });
 // The authoritative ball set, not just positions: reconcile the rack to match
 // exactly. This is what stops a ghost ball surviving past a shot — whatever the
 // client got up to during playback, this puts it back in agreement.
-socket.on('balls', whenLive('balls', ({ items }) => syncRack(items)));
+socket.on('balls', (frame) => timeline.setLiveBalls(frame));
 socket.on('aimState', (a) => {
   Object.assign(opponentAim, a);
   // First aim of a new spectated turn → snap the shown cue to it, then ease.
@@ -470,7 +454,7 @@ function giveUp(message) {
   setBanner(null);
   saveSession(null);
   $('menuMsg').textContent = message;
-  cancelReplay(); resetReview(); clearRack(); showMenu();
+  timeline.reset(); clearRack(); showMenu();
 }
 
 function tryReconnect() {
@@ -566,7 +550,7 @@ function hideInGameControls() {
 // tracking the ball's projected screen position; hidden otherwise.
 function updatePlaceButton() {
   const btn = $('placeConfirm');
-  const show = net.inGame && !isReviewing() && !replaying() && gs.interact === PH_PLACING && myTurn();
+  const show = net.inGame && isLive() && gs.interact === PH_PLACING && myTurn();
   btn.classList.toggle('hidden', !show);
   if (!show || !stageCanvas) return;
   const cue = getCueMeshPosition();   // track the ball where it actually rests (legal spot)
@@ -585,113 +569,85 @@ function pocketedNow(baseline) {
 }
 
 // ---- Render loop ------------------------------------------------------------
+// ONE path. Everything that used to need a separate branch — live play, a shot
+// replaying, a reconnect backlog draining, a past shot being reviewed — differs
+// only in where the playhead is, so the loop asks that and nothing else.
 function loop(now) {
   requestAnimationFrame(loop);
   if (!sceneReady) return;
   if (input) input.tick();
   updatePlaceButton();   // ✓ button follows the cue ball during ball-in-hand
 
-  // Reviewing a past shot takes over the table locally: drive the review
-  // playhead and skip all live logic. All three cameras stay available (V
-  // cycles aim → free → overhead). The review player shows the cue stick
-  // drawing back and striking at the start of each shot (it toggles the cue
-  // visibility + aim state itself); here we just render it at the cue ball.
-  if (isReviewing()) {
-    reviewTick(now);
-    const view = camPref;   // 'aim' | 'free' | 'top'
-    setViewMode(view);
-    const cuePos = getCueMeshPosition();
-    const anchor = reviewCueAnchor();
-    if (view === 'aim' && anchor) {
-      // Aim view stays fixed at the cue's START, sighting down the shot line —
-      // it does NOT follow the cue ball as the shot plays out.
-      _reviewAnchor.set(anchor.x, anchor.y, anchor.z);
-      updateCueAndCamera(_reviewAnchor);
-    } else {
-      if (cuePos && isCueVisible()) updateCueStick(cuePos);      // stick only
-      placeCamera();
-    }
-    // HUD during review: the pocketed column updates as balls drop in the replay
-    // (baseline = pocketed as of this shot's start), plus the shot's spin/power.
-    const s = getStrikeOffset();
-    drawHud({
-      strikeX: s.x, strikeY: s.y, power: getPullback() / getMaxPullback(),
-      view, pocketed: pocketedNow(reviewPocketedBaseline()), ballCount,
-      bottomInset: reviewChromeHeight(),   // draw above the replay transport bar
-    });
-    updateViewUi(view);
-    $('banner').classList.remove('show');   // don't let the win banner cover the replay
-    render();
-    wasReviewing = true;
-    return;
-  }
-  if (wasReviewing) {   // just exited review — restore the win banner if the game's over
-    wasReviewing = false;
-    $('banner').classList.toggle('show', gs.winner >= 0);
-  }
+  timeline.tick(now);    // advance the playhead if a shot is on screen
 
-  replay.tick(now);
+  if (!net.inGame) { clearHud(); hideInGameControls(); render(); return; }
 
-  if (net.inGame) {
-    // While a shot replay is playing, behave as if the table were live-shooting
-    // (spectator camera, cue hidden) regardless of the — deferred — game state.
-    const interact = replaying() ? PH_SHOOTING : gs.interact;
-    const cuePos = getCueMeshPosition();
-    // Feed cue.js the active aim: mine (already set by input) or the opponent's.
-    if (interact === PH_AIMING) {
-      if (myTurn()) {
-        // Enforce cue elevation: raise pitch to clear any ball/rail behind the
-        // cue ball along the current aim (the player can't dip below it).
-        if (cuePos) {
-          // Same call the server makes authoritatively inside resolveStrike, so
-          // what the player sees here is what the shot will actually be played at.
-          setPitch(legalPitch(getPitch(), {
-            cx: cuePos.x, cz: cuePos.z, yaw: getYaw(), strikeY: getStrikeOffset().y,
-            obstacles: getObstaclePositions(), railPts: railPoints,
-          }));
-        }
-        maybeSendAim(now);
-      } else {
-        // Spectating the opponent/bot: ease the shown cue toward the streamed
-        // target so their aim and draw-back interpolate smoothly.
-        easeOpponentView();
-        setYaw(opponentView.yaw); setPitch(opponentView.pitch);
-        setStrikeOffset(opponentView.strikeX, opponentView.strikeY); setPullback(opponentView.pullback);
+  const past = timeline.current();        // the shot on screen, or null if live
+  const cuePos = getCueMeshPosition();
+
+  // What the table is DOING. Watching a shot looks like PH_SHOOTING whatever the
+  // game state says, because the game state describes the present and a replay
+  // is the past.
+  const interact = past ? PH_SHOOTING : gs.interact;
+
+  // Aim only matters live: it is present-tense data, and a recorded shot poses
+  // the stick from its own recording (shotPlayer).
+  if (!past && interact === PH_AIMING) {
+    if (myTurn()) {
+      // Enforce cue elevation: raise pitch to clear any ball/rail behind the cue
+      // ball along the current aim. Same call the server makes authoritatively
+      // inside resolveStrike, so what you see is what will be played.
+      if (cuePos) {
+        setPitch(legalPitch(getPitch(), {
+          cx: cuePos.x, cz: cuePos.z, yaw: getYaw(), strikeY: getStrikeOffset().y,
+          obstacles: getObstaclePositions(), railPts: railPoints,
+        }));
       }
+      maybeSendAim(now);
+    } else {
+      // Spectating: ease the shown cue toward the streamed target so the
+      // opponent's aim and draw-back interpolate smoothly.
+      easeOpponentView();
+      setYaw(opponentView.yaw); setPitch(opponentView.pitch);
+      setStrikeOffset(opponentView.strikeX, opponentView.strikeY); setPullback(opponentView.pullback);
     }
-    // Resolve the camera. Free (V-cycle) overrides everything — a fly-around
-    // works any time. Otherwise overhead is forced while placing, spectating
-    // the opponent, or at game-over (bird's-eye of the final table); on my own
-    // shot the V preference ('aim' or 'top') applies.
-    const forcedTop = interact === PH_PLACING || interact === PH_OVER || !myTurn();
-    const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
-    setViewMode(view);
-    // The stick also stays up through a catch-up shot's draw-back lead-in —
-    // replay.tick has already posed it along the recorded shot line.
-    setCueVisible(interact === PH_AIMING || drawingBack());
-
-    if (cuePos && interact === PH_AIMING) updateCueAndCamera(cuePos);
-    else {
-      if (cuePos && drawingBack()) updateCueStick(cuePos);   // render it, don't move the camera
-      placeCamera();
-    }
-
-    // HUD overlay: spin dial, power meter, camera view, pocketed balls. cue.js
-    // state also carries the opponent's/bot's streamed aim while spectating, so
-    // the dial + meter mirror their draw-back too.
-    const s = getStrikeOffset();
-    drawHud({
-      strikeX: s.x, strikeY: s.y,
-      power: getPullback() / getMaxPullback(),
-      view,
-      pocketed: pocketedNow(gs.pocketed),
-      ballCount,
-    });
-    updateViewUi(view);
-  } else {
-    clearHud();
-    hideInGameControls();
   }
+
+  // Camera. Free (V-cycle) overrides everything. Reviewing keeps the V
+  // preference as-is — you chose to look at this. Live, overhead is forced while
+  // placing, spectating, or at game-over.
+  const forcedTop = !past && (interact === PH_PLACING || interact === PH_OVER || !myTurn());
+  const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
+  setViewMode(view);
+  setCueVisible(interact === PH_AIMING || drawingBack());
+
+  // A reviewed shot anchors the aim camera at the cue ball's STARTING rest
+  // position, sighting down the shot line, rather than chasing the ball.
+  const anchor = past ? timeline.cueAnchor() : null;
+  if (view === 'aim' && anchor) {
+    _reviewAnchor.set(anchor.x, anchor.y, anchor.z);
+    updateCueAndCamera(_reviewAnchor);
+  } else if (cuePos && interact === PH_AIMING && !past) {
+    updateCueAndCamera(cuePos);
+  } else {
+    if (cuePos && (drawingBack() || (past && isCueVisible()))) updateCueStick(cuePos);
+    placeCamera();
+  }
+
+  // HUD. The pocketed column counts from whatever was already down when the
+  // shot on screen began, so balls appear in it as they drop — live or replayed.
+  const s = getStrikeOffset();
+  drawHud({
+    strikeX: s.x, strikeY: s.y,
+    power: getPullback() / getMaxPullback(),
+    view,
+    pocketed: pocketedNow(timeline.pocketedBaseline()),
+    ballCount,
+    bottomInset: reviewChromeHeight(),   // keep clear of the transport bar
+  });
+  updateViewUi(view);
+  // Don't let the win banner cover a replay.
+  $('banner').classList.toggle('show', !past && gs.winner >= 0);
 
   render();
 }
@@ -702,16 +658,19 @@ window.addEventListener('error', e => window.__errors.push(String(e.message || e
 window.__net = { socket, state: () => gs, me: () => net };
 window.__ballIds = ballIds;   // debug: client-side rendered ball set (ghost detection)
 window.__sunk = sunkNumbers;  // debug: balls currently dropped into a pocket
-window.__reviewHistory = reviewHistory;   // debug: recorded shot anims
-window.__reviewBaseline = reviewPocketedBaseline;   // debug: review pre-shot pocketed set
+window.__reviewHistory = () => timeline.entries();   // debug: the rack's shot log
+window.__reviewBaseline = () => timeline.pocketedBaseline();
 // debug: cue stick state — visible, how far drawn back, and whether that's the
 // catch-up replay's draw-back lead-in driving it
 window.__cue = () => ({ visible: isCueVisible(), pullback: getPullback(), drawingBack: drawingBack() });
-// debug: replay pipeline state — is a shot playing, how many are queued behind
-// it, and how many deferred packets are waiting to be applied
 window.__camera = () => camera;          // debug: live camera (zoom/dolly checks)
 window.__cuePos = getCueMeshPosition;    // debug: cue ball position
-window.__replay = replay.state;
+// debug: where the playhead is — live, following, and what is queued
+window.__replay = () => {
+  const st = timeline.state();
+  return { playing: !st.live, pending: st.unwatched, live: st.live, following: st.following, slot: st.slot };
+};
+window.__timeline = () => timeline.state();
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');

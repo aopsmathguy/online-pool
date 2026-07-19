@@ -182,9 +182,14 @@ describe('replay + resume', { skip }, () => {
     assertInvariant(await snap(b), 'after reviewing');
   }, { timeout: 180_000 });
 
-  test('the page reported no uncaught errors throughout', async () => {
+  test('the page reported no errors throughout', async () => {
     const s = await snap(b);
     const errs = realErrors(s.errors);
     assert.deepEqual(errs, [], `page errors: ${errs.join(' | ')}`);
+    // Console too: socketUtility swallows handler throws and logs them as
+    // "Packet doesn't fit schema", so window.onerror never sees them. A
+    // ReferenceError in a packet handler leaves no other trace.
+    const problems = b.consoleProblems();
+    assert.deepEqual(problems, [], `console problems: ${problems.join(' | ')}`);
   });
 });
