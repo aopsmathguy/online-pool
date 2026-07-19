@@ -195,9 +195,16 @@ export function bindInput(canvas, handlers) {
   window.addEventListener('pointerup', onPointerUp);
   window.addEventListener('pointercancel', onPointerUp);
 
+  // Sliders keep focus after a click, so anything that isn't text entry has to
+  // let movement keys through — the range controls only use arrows/Home/End.
+  const isTextEntry = (t) => {
+    if (!t) return false;
+    if (t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable) return true;
+    return t.tagName === 'INPUT' && t.type !== 'range';
+  };
+
   document.addEventListener('keydown', e => {
-    const t = e.target;
-    if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA')) return;
+    if (isTextEntry(e.target)) return;
     if (drag === 'power' && e.key === 'Escape') { drag = null; dragId = null; setPullback(0); e.preventDefault(); return; }
     if (e.key === 'v' || e.key === 'V') onToggleView();
     const k = moveKeyFor(e);
