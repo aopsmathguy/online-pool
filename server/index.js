@@ -109,7 +109,7 @@ function broadcastPhase(room) {
 // server the sim is already back in PH_AIMING with `current` flipped — every
 // guard inside applyShoot is satisfied for the opponent immediately. Honest
 // clients don't race it because their own gameState is deferred behind their
-// replay (see afterReplay in client/main.js), but the server must not rely on
+// replay (the shot carries its own outcome), but the server must not rely on
 // that. Centralized so no future caller can forget it; performShot checks it
 // itself for the same reason.
 function replayLocked(room) {
@@ -178,10 +178,6 @@ function startMatch(room, changeGame) {
 // the bot deciding) while everyone is still watching.
 function performShot(room, playerIdx, params) {
   if (replayLocked(room)) return false;   // belt and braces; callers check too
-  // Captured BEFORE the shot resolves: a resuming client needs the HUD state as
-  // it stood when the backlog begins (names, groups, whose turn), otherwise its
-  // top bar sits blank for the whole catch-up. Only worth computing when
-  // somebody is actually away.
   // Captured BEFORE the shot resolves, for every shot: the HUD state and the
   // rack as they stood when this shot was taken. A resuming client rebuilds
   // from these — without the layout, balls pocketed during a replayed shot have
@@ -194,15 +190,20 @@ function performShot(room, playerIdx, params) {
   // everyone is still watching is that much longer than the recording itself.
   room.replayUntil = Date.now() + SHOT_STRIKE_MS + anim.durationMs + REPLAY_SLACK_MS;
   anim.packet.index = room.shotIndex++;
+  // The shot carries its own outcome. `balls` is the authoritative set AFTER the
+  // shot resolved, which includes startPlacement having already teleported the
+  // cue ball to its ball-in-hand spot — NOT the resting frame, which is the last
+  // frame of the recording and is what the client shows until the replay ends.
+  // The client applies all of this when playback finishes, so nothing about the
+  // outcome can arrive early and nothing has to be queued.
+  anim.packet.post = {
+    state: room.sim.gameStatePacket(),
+    balls: room.sim.ballsFrame(),
+    placing: room.sim.placingPacket(),   // .active is false unless it's ball-in-hand
+  };
   room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
   trimShotLog(room);
   broadcast(room, 'shotAnim', anim.packet);
-  // The authoritative ball set and positions AFTER the shot resolved — which
-  // includes startPlacement having already teleported the cue ball to its
-  // ball-in-hand spot. Not the resting frame: that is the last frame of the
-  // recording, and it is what the client shows until the replay ends.
-  broadcast(room, 'balls', room.sim.ballsFrame());
-  broadcastPhase(room);
   return true;
 }
 
@@ -286,19 +287,16 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   const info = (missed.length && missed[0].preLayout) || sim.startInfo();
   conn.socket.emit('startGame', { game: gameByteFromId(info.game), firstPlayer: info.firstPlayer, layout: info.layout });
 
-  // Each shot is preceded by the HUD state as it stood when that shot was taken,
-  // so the top bar and status track the backlog shot by shot instead of being
-  // frozen at the batch's opening state. The client attaches a gameState that
-  // arrives mid-catch-up to the NEXT queued shot rather than deferring it to the
-  // end (see beginReplay), which is what keeps them in step.
-  for (const s of missed) {
-    conn.socket.emit('gameState', s.pre);
-    conn.socket.emit('shotAnim', s.packet);
-  }
+  // The HUD state as it stood when the backlog begins. Each shot then carries
+  // its own `post`, so the top bar tracks the catch-up shot by shot on its own —
+  // no interleaving of state packets with recordings, and no ordering contract
+  // between this loop and the client's replay queue.
+  conn.socket.emit('gameState', (missed.length && missed[0].pre) || sim.gameStatePacket());
+  for (const s of missed) conn.socket.emit('shotAnim', s.packet);
 
-  // The client defers these behind its replay queue, so they land only after
-  // the last missed shot has finished playing. Emitted to this socket alone
-  // rather than via broadcastPhase — the opponent is already up to date.
+  // Reconcile to the present. The last shot's `post` usually covers this, but
+  // state can move after it (a placement drag, a newGame), so send it anyway —
+  // it is idempotent. To this socket alone; the opponent is already up to date.
   conn.socket.emit('balls', sim.ballsFrame());
   conn.socket.emit('gameState', sim.gameStatePacket());
   if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());

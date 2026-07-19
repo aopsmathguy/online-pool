@@ -17,10 +17,10 @@ import {
 } from './cue.js';
 import { bindInput } from './input.js';
 import {
-  buildRack, syncRack, removeBallView, setCuePosition,
+  buildRack, syncRack, setCuePosition,
   getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
 } from './balls.view.js';
-import { makeShotPlayer, openingBalls } from './shotPlayer.js';
+import { createReplayQueue } from './replayQueue.js';
 import { legalPitch, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
@@ -231,109 +231,36 @@ $('btnLeaveGame').addEventListener('click',  () => { socket.emit('leaveRoom', {}
 $('btnNewGame').addEventListener('click',    () => socket.emit('newGame', { game: 255 }));
 
 // ---- Shot replay --------------------------------------------------------------
-// The server simulates the ENTIRE shot the moment it's taken and sends one
-// `shotAnim` packet: delta-encoded keyframes at dtMs intervals from strike to
-// rest (see packets.js; beginReplay expands them back to full frames), plus
-// which balls vanish at which frame. The client plays that back at
-// wall-clock rate, interpolating between the two keyframes bracketing the
-// playhead (lerp + slerp) — perfectly smooth at any refresh rate, no network
-// hiccups possible mid-shot. Post-shot packets (gameState/placing/balls) are
-// broadcast immediately after the recording, so they're QUEUED while the
-// replay runs and applied when it finishes — HUD messages and ball-in-hand
-// don't spoil the outcome early.
+// Sequencing lives in replayQueue.js; playback in shotPlayer.js. Here we only
+// wire them to the scene, the HUD and the review recorder.
 //
-// Shots QUEUE rather than replace each other (replay.pending): a client that
-// reconnects after a drop is sent every shotAnim it missed back-to-back, and
-// plays them through in order at normal speed to catch up.
-// catchUp: this batch of shots is a reconnect backlog, not a live shot — the
-// camera goes overhead for the duration so you can see the whole table while
-// the missed shots play out.
-const replay = { player: null, anim: null, start: 0, queue: [], pending: [], catchUp: false };
+// A `shotAnim` is self-contained: keyframes from strike to rest, plus `post` —
+// the state the shot resolved to. So the outcome cannot arrive before you have
+// watched the shot, and there is nothing to defer.
+const replay = createReplayQueue({
+  // Replay frames carry only ids; the rack needs numbers to texture a mesh. The
+  // id→number map for this rack is fixed at startGame (shotReview owns it).
+  syncRack: (balls) => syncRack(balls.map(b => ({ ...b, number: numberForBallId(b.id) }))),
+  applyPost: ({ state, balls, placing }) => {
+    applyGameState(state);
+    syncRack(balls.items);
+    if (placing.active) applyPlacing(placing);
+  },
+  // `gs` still holds the PRE-shot state here — `post` is only applied when the
+  // shot ENDS — so this is the shooter's chip name and the balls already
+  // pocketed before the shot (the review's pocketed-column baseline).
+  onShotStart: (anim) => {
+    const shooter = (gs.chips && gs.chips[gs.current] && gs.chips[gs.current].text) || `Player ${gs.current + 1}`;
+    recordShot(anim, shooter, gs.pocketed || []);
+  },
+  onShotEnd: (index) => noteShotWatched(index),   // a reload now resumes AFTER this shot
+  isReviewing,
+  hideCue: () => setCueVisible(false),
+});
 
-const drawingBack = () => !!replay.player && replay.player.drawingBackAt(performance.now() - replay.start);
-const replaying = () => !!replay.player || replay.pending.length > 0;
-
-function beginReplay(anim) {
-  // Catching up, anything deferred since the previous shot is THIS shot's
-  // pre-state (the server sends each backlog shot's gameState just before it).
-  // Hand those packets to the shot so they land when it starts playing, in
-  // arrival order. Whatever arrives after the LAST shot — the post-backlog
-  // balls/gameState/placing — stays in the queue and is applied when the batch
-  // finishes, which is what stops the final state going missing.
-  if (replay.catchUp && replay.queue.length) anim.pre = replay.queue.splice(0);
-  if (replay.player) { replay.pending.push(anim); return; }   // still watching the previous one
-  startAnim(anim);
-}
-
-// Start playing one shot. Deliberately deferred until the shot reaches the front
-// of the queue: recordShot below reads the PRE-shot `gs`, which is only correct
-// once the preceding shot's state has been applied.
-function startAnim(anim) {
-  // Reconcile to the authoritative start-of-shot set before playing: frame 0
-  // lists exactly the balls in play when the shot began. Anything we're missing
-  // is created (a ball pocketed later in a catch-up backlog must exist to be
-  // seen sinking) and anything spare is dropped. Skipped while reviewing — the
-  // review owns the meshes then and restores the live set on exit.
-  // This shot's own pre-state (HUD/status), applied before it plays.
-  if (anim.pre) { for (const { fn, data } of anim.pre) fn(data); anim.pre = null; }
-  if (!isReviewing()) syncRack(openingBalls(anim).map(withNumber));
-
-  // Every shot plays the same way, live or caught-up: draw back, strike, stick
-  // gone. Same call the review player makes.
-  replay.player = makeShotPlayer(anim, { animateStick: true });
-  replay.anim = anim;
-  replay.start = performance.now();
-  // Post-shot gameState is deferred (afterReplay), so `gs` still holds the
-  // PRE-shot state here — grab the shooter's chip name and the balls already
-  // pocketed before this shot (the review's pocketed-column baseline).
-  const shooter = (gs.chips && gs.chips[gs.current] && gs.chips[gs.current].text) || `Player ${gs.current + 1}`;
-  recordShot(anim, shooter, gs.pocketed || []);   // stash the shot for the review player
-}
-
-// Replay frames carry only ids; the rack needs numbers to texture a mesh. The
-// id→number map for this rack is fixed at startGame (shotReview owns it).
-const withNumber = (b) => ({ ...b, number: numberForBallId(b.id) });
-
-function tickReplay(now) {
-  const p = replay.player;
-  if (!p) return;
-  // Clamped at 0: the rAF timestamp marks the start of the frame batch, so it
-  // can PREDATE the performance.now() startAnim took inside the socket handler.
-  const t = Math.max(0, now - replay.start);
-  if (t >= p.duration) return endReplay();
-  p.applyAt(t);
-}
-
-function endReplay() {
-  const p = replay.player;
-  if (!p) return;
-  p.applyAt(p.duration);          // snap to the final frame
-  setCueVisible(false);
-  const a = replay.anim;
-  replay.player = null;
-  replay.anim = null;
-  noteShotWatched(a.index);                      // a reload now resumes AFTER this shot
-  // Catching up: roll straight into the next missed shot, and keep the deferred
-  // post-shot packets queued — they describe the state after the LAST one.
-  if (replay.pending.length) { startAnim(replay.pending.shift()); return; }
-  replay.catchUp = false;                        // backlog drained — camera back to normal
-  const q = replay.queue.splice(0);
-  for (const { fn, data } of q) fn(data);        // deliver the post-shot packets
-}
-
-function cancelReplay() {
-  replay.player = null;
-  replay.anim = null;
-  replay.pending.length = 0;
-  replay.queue.length = 0;
-  replay.catchUp = false;
-}
-
-// Defer a handler while a replay is playing; run it live otherwise.
-const afterReplay = (fn) => (data) => {
-  if (replaying()) replay.queue.push({ fn, data });
-  else fn(data);
-};
+const drawingBack = () => replay.drawingBack();
+const replaying = () => replay.isPlaying();
+const cancelReplay = () => replay.cancel();
 
 // ---- Server events ----------------------------------------------------------
 socket.on('errorMsg', ({ message }) => {
@@ -380,7 +307,6 @@ socket.on('startGame', ({ game, layout }) => {
     // start it overhead so the whole table is visible — a starting preference,
     // not a lock; V still cycles the view as it does for any opponent shot.
     net.resuming = false;
-    replay.catchUp = true;
     camPref = 'top';
   } else if (session) {
     saveSession({ ...session, shotIndex: 0 });   // new rack → new shot numbering
@@ -392,10 +318,9 @@ socket.on('startGame', ({ game, layout }) => {
   if (net.bot) socket.emit('botSkill', { value: botSkillVal() });  // sync slider → server
 });
 
-// Adopt a game state: HUD text, player chips, turn-transition side effects. Used
-// both for live states and for the per-shot states that ride along with a
-// catch-up backlog, so the top bar tracks a replayed shot the same way it tracks
-// a live one.
+// Adopt a game state: HUD text, player chips, turn-transition side effects.
+// Called for live states and, via a shot's own `post`, when a replay ends — so
+// the top bar tracks a replayed shot the same way it tracks a live one.
 function applyGameState(state) {
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
   gs = state;
@@ -414,24 +339,25 @@ function applyGameState(state) {
   prevTurnKey = turnKey;
 }
 
-// Deferred while a replay runs so the outcome isn't spoiled early. During a
-// catch-up the deferral is shorter: beginReplay claims whatever is queued as the
-// next shot's pre-state, so the status tracks the backlog shot by shot.
-socket.on('gameState', afterReplay(applyGameState));
-
-socket.on('placing', afterReplay((p) => {
+// Adopt a ball-in-hand state. Also reached via a shot's `post` when the shot
+// ended in a foul.
+function applyPlacing(p) {
   gs.interact = PH_PLACING;
   gs.current = p.player;
   if (p.player === net.myIndex) { localPlace.x = p.x; localPlace.z = p.z; }
   setCuePosition(p.x, p.z);
-}));
+}
 
-socket.on('shotAnim', (anim) => beginReplay(anim));
+// These arrive between shots (a new rack, a placement drag, a resume reconcile),
+// never during one — a shot's outcome rides inside the shot itself. No
+// deferral, no queue, no ordering to get right.
+socket.on('gameState', applyGameState);
+socket.on('placing', applyPlacing);
+socket.on('shotAnim', (anim) => replay.push(anim));
 // The authoritative ball set, not just positions: reconcile the rack to match
 // exactly. This is what stops a ghost ball surviving past a shot — whatever the
 // client got up to during playback, this puts it back in agreement.
-socket.on('balls', afterReplay(({ items }) => { syncRack(items); }));
-socket.on('removeBall', afterReplay(({ id }) => { removeBallView(id); }));
+socket.on('balls', ({ items }) => syncRack(items));
 socket.on('aimState', (a) => {
   Object.assign(opponentAim, a);
   // First aim of a new spectated turn → snap the shown cue to it, then ease.
@@ -647,7 +573,7 @@ function loop(now) {
     $('banner').classList.toggle('show', gs.winner >= 0);
   }
 
-  tickReplay(now);
+  replay.tick(now);
 
   if (net.inGame) {
     // While a shot replay is playing, behave as if the table were live-shooting
@@ -684,7 +610,7 @@ function loop(now) {
     const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
     setViewMode(view);
     // The stick also stays up through a catch-up shot's draw-back lead-in —
-    // tickReplay has already posed it along the recorded shot line.
+    // replay.tick has already posed it along the recorded shot line.
     setCueVisible(interact === PH_AIMING || drawingBack());
 
     if (cuePos && interact === PH_AIMING) updateCueAndCamera(cuePos);
@@ -728,10 +654,7 @@ window.__cue = () => ({ visible: isCueVisible(), pullback: getPullback(), drawin
 // it, and how many deferred packets are waiting to be applied
 window.__camera = () => camera;          // debug: live camera (zoom/dolly checks)
 window.__cuePos = getCueMeshPosition;    // debug: cue ball position
-window.__replay = () => ({
-  playing: !!replay.player, pending: replay.pending.length,
-  queue: replay.queue.length, catchUp: replay.catchUp,
-});
+window.__replay = replay.state;
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');
