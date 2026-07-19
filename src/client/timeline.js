@@ -64,6 +64,13 @@ export function createTimeline({
     playhead = null;
     following = true;
     pendingSlot = -1;
+    // The stored truth belongs to the rack we are leaving. It has to go with it:
+    // a new rack arrives as startGame + gameState, and gameState carries NO ball
+    // set (broadcastPhase sends state alone). Keeping the old `balls` here meant
+    // the first gameState of a new game ran renderLive() and synced the rack
+    // straight back to the previous game's positions — the freshly built rack
+    // was overwritten a frame after it appeared.
+    live.state = null; live.balls = null; live.placing = null;
     changed();
   }
 

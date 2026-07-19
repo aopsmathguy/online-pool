@@ -230,6 +230,58 @@ describe('replay + resume', { skip }, () => {
     }
   }, { timeout: 240_000 });
 
+  test('New Game racks a fresh table instead of restoring the old one', async () => {
+    // THE reported bug: press New Game and the previous game is still on screen.
+    //
+    // The client DID build the new rack from startGame's layout. What undid it
+    // was the gameState that follows: broadcastPhase sends state with NO ball
+    // packet, and the timeline's stored `live.balls` survived reset(), so the
+    // first render of the new rack synced it straight back to the old game's
+    // positions. Scatter the table first — a fresh rack is tightly clustered, so
+    // "did the old table come back" is visible in the ball spread alone.
+    const spread = `(() => {
+      const bs = window.__ballIds().filter(b => b.id !== 0);
+      if (!bs.length) return null;
+      const mx = bs.reduce((a,b) => a+b.x, 0)/bs.length;
+      const mz = bs.reduce((a,b) => a+b.z, 0)/bs.length;
+      return +Math.sqrt(bs.reduce((a,b) => a + (b.x-mx)**2 + (b.z-mz)**2, 0)/bs.length).toFixed(4);
+    })()`;
+
+    await b.freshGame();
+    const racked = await b.evaluate(spread);
+
+    await b.evaluate(`window.__net.socket.emit('placeConfirm', {})`);
+    await b.waitFor(`(window.__net.state()||{}).interact === 0`, { what: 'aiming' });
+    await b.evaluate(`window.__net.socket.emit('shoot', {yaw:0.05,pitch:0.06,strikeX:0,strikeY:0,power:1})`);
+    // Wait for the replay to START before waiting for it to end: `!playing` is
+    // trivially true in the gap before it begins, so the two waits collapse and
+    // the spread gets measured on the un-broken rack.
+    await b.waitFor(`window.__replay().playing`, { timeout: 90_000, what: 'the break to start' });
+    await b.waitFor(`!window.__replay().playing && !!window.__cuePos()`,
+      { timeout: 90_000, what: 'the break to finish' });
+    const broken = await b.evaluate(spread);
+    assert.ok(broken > racked * 1.5,
+      `the break did not scatter the rack (${racked} -> ${broken}); the test cannot tell the racks apart`);
+
+    // The real button, not a synthetic emit — this is the path players take.
+    await b.evaluate(`document.getElementById('btnNewGame').click()`);
+    await b.waitFor(`(window.__net.state()||{}).interact === 2`,
+      { timeout: 40_000, what: 'the new game to open in placement' });
+    // Let the gameState that follows startGame land: the regression happens on
+    // that packet, not on startGame itself, so asserting too early passes even
+    // when broken.
+    await sleep(600);
+
+    const after = await snap(b);
+    const reracked = await b.evaluate(spread);
+    assert.ok(reracked < racked * 1.5,
+      `New Game left the old game's spread on screen (${reracked}, fresh rack is ~${racked})`);
+    assert.deepEqual(after.pocketed, [], 'the new game inherited the old pocketed set');
+    assert.equal(after.numbers.length, 15, 'the new rack is missing balls');
+    assert.equal(after.reviewShots, 0, 'the previous rack\'s shots survived into the new one');
+    assertInvariant(after, 'after starting a new game');
+  }, { timeout: 180_000 });
+
   test('the page reported no errors throughout', async () => {
     const s = await snap(b);
     const errs = realErrors(s.errors);

@@ -211,7 +211,12 @@ export function sunkNumbers() {
 
 // Every ball currently rendered (id, number, y) — for ghost detection in tests.
 export function ballIds() {
-  return [...views.entries()].map(([id, v]) => ({ id, number: v.number, y: +v.mesh.position.y.toFixed(3) }));
+  return [...views.entries()].map(([id, v]) => ({
+    id, number: v.number,
+    x: +v.mesh.position.x.toFixed(3),
+    y: +v.mesh.position.y.toFixed(3),
+    z: +v.mesh.position.z.toFixed(3),
+  }));
 }
 
 // XZ positions of every ball except the cue (id 0) — used for cue-clearance.
