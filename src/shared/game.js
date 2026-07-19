@@ -10,6 +10,7 @@
 // Ruleset interface (see src/rules/eightball.js):
 //   meta:{id,name}  rack(ctx)  init(match)  snapshot(match)
 //   resolve(shot,match)->decision   hud(match)->{chips,status}
+//   legalTargets(match)->number[]
 // A `decision`: { gameOver, winner, foul, reason, continues, ballInHand, message }.
 import { getRuleset, defaultRulesetId, listRulesets } from './rules/index.js';
 
@@ -114,6 +115,10 @@ export function createGame(rulesetId, balls = []) {
     endShot, reset, setRuleset,
     rackLayout: (ctx) => ruleset.rack(ctx),
     hudView: () => (ruleset.hud ? ruleset.hud(match) : { chips: [], status: '' }),
+    // Numbers the cue ball may legally contact first. Used by the shot chooser;
+    // a ruleset that doesn't implement it offers no targets rather than
+    // pretending everything is legal.
+    legalTargets: () => (ruleset.legalTargets ? ruleset.legalTargets(match) : []),
     getRulesetId: () => ruleset.meta.id,
     isBreak: () => match.phase === 'break',
     isOver: () => match.phase === 'over',

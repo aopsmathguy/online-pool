@@ -10,6 +10,13 @@
 //   snapshot(match)      -> any                  pre-shot state legality needs
 //   resolve(shot, match) -> decision             judge a finished shot
 //   hud(match)           -> { chips, status }    strings for the sidebar
+//   legalTargets(match)  -> number[]             what the cue may hit first
+//
+// legalTargets exists so the shot chooser (src/server/ai.js) never has to know
+// which game is being played. It is a PLANNING aid, not the legality judge —
+// resolve() is the authority. A ruleset may return a stricter set than resolve
+// would accept (both of the current two do, on the break); the bot just plays
+// more conservatively than it strictly has to.
 import { eightBall } from './eightball.js';
 import { nineBall } from './nineball.js';
 

@@ -63,6 +63,19 @@ function snapshot(match) {
   return { lowest: lowestOnTable(match) };
 }
 
+// Which numbers may the cue ball legally contact first right now? Rotation, so
+// always the lowest ball on the table.
+//
+// Consumed by the shot chooser (src/server/ai.js), NOT by resolve() — it is a
+// planning aid, not the legality judge. Deliberately STRICTER than resolve on
+// the break, where resolve skips the lowest-ball check entirely: hitting the
+// lowest ball is legal in every phase, so the bot never needs the exception,
+// and keeping it uniform means break play does not depend on this function.
+function legalTargets(match) {
+  const low = lowestOnTable(match);
+  return low == null ? [] : [low];
+}
+
 function over(match, winnerIdx, why) {
   return {
     gameOver: true,
@@ -134,5 +147,5 @@ function hud(match) {
 
 export const nineBall = {
   meta: { id: '9ball', name: '9-Ball' },
-  rack, init, snapshot, resolve, hud,
+  rack, init, snapshot, resolve, hud, legalTargets,
 };

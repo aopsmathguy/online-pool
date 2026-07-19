@@ -106,6 +106,25 @@ function over(match, winnerIdx, why) {
   };
 }
 
+// Which numbers may the cue ball legally contact first right now?
+//
+// Consumed by the shot chooser (src/server/ai.js), NOT by resolve() — it is a
+// planning aid, not the legality judge. That is why it is deliberately STRICTER
+// than resolve on the break: resolve allows any first contact there, but a bot
+// gains nothing by breaking off the 8, so the 8 is excluded. Widening this to
+// match resolve exactly would change how the bot breaks; don't do it casually.
+function legalTargets(match) {
+  const onTable = match.balls.filter(b => b.number != null).map(b => b.number);
+  if (match.phase === 'play') {
+    const grp = match.players[match.current].group;
+    const mine = onTable.filter(n => groupOf(n) === grp);
+    return mine.length ? mine : onTable.filter(n => n === 8);   // group cleared → on the 8
+  }
+  // break / open table: anything but the 8 is always safe to contact first.
+  const open = onTable.filter(n => n !== 8);
+  return open.length ? open : onTable;
+}
+
 function resolve(s, match) {
   const me = match.current;
   const opp = 1 - me;
@@ -214,5 +233,5 @@ function hud(match) {
 
 export const eightBall = {
   meta: { id: '8ball', name: '8-Ball' },
-  rack, init, snapshot, resolve, hud,
+  rack, init, snapshot, resolve, hud, legalTargets,
 };

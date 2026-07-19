@@ -45,7 +45,6 @@ import {
   tableW, tableH, R, g, mu_felt_linear, rodR, wireY,
 } from '../shared/constants.js';
 import { rail_pts } from '../shared/table.js';
-import { groupOf } from '../shared/rules/eightball.js';
 import { SHOT_IMPULSE_PER_M } from './sim.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
 import { POCKET_MOUTHS as POCKETS } from '../shared/pockets.js';
@@ -109,24 +108,6 @@ function ballsXZ(sim) {
     const o = b.body.getWorldTransform().getOrigin();
     return { number: b.number, x: o.x(), z: o.z() };
   });
-}
-
-// Which numbers may the cue ball legally contact first right now?
-function legalTargetNumbers(sim) {
-  const m = sim.game.getState();
-  const onTable = m.balls.filter(b => b.number != null).map(b => b.number);
-  if (sim.game.getRulesetId() === '9ball') {
-    return onTable.length ? [Math.min(...onTable)] : [];
-  }
-  // 8-ball
-  if (m.phase === 'play') {
-    const grp = m.players[m.current].group;
-    const mine = onTable.filter(n => groupOf(n) === grp);
-    return mine.length ? mine : onTable.filter(n => n === 8);   // group cleared → on the 8
-  }
-  // break / open table: anything but the 8 is always safe to contact first
-  const open = onTable.filter(n => n !== 8);
-  return open.length ? open : onTable;
 }
 
 // Aim point + apparent opening of pocket `p` as seen from object ball `t`.
@@ -441,7 +422,7 @@ export function computeBotShot(sim, difficulty = 0.5) {
   const balls = ballsXZ(sim);
   const cue = balls[0];
   const objects = balls.slice(1);
-  const targets = legalTargetNumbers(sim);
+  const targets = sim.game.legalTargets();
   const shot = { yaw: 0, pitch: 0.06, strikeX: 0, strikeY: 0, power: 0.3 };
   const jRad = aimJitterRad(difficulty);
 
@@ -527,7 +508,7 @@ export function computeBotShot(sim, difficulty = 0.5) {
 // the highest score. Returns {x, z} or null to keep the default spot.
 export function computeBotPlacement(sim) {
   const objects = ballsXZ(sim).slice(1);
-  const targets = legalTargetNumbers(sim);
+  const targets = sim.game.legalTargets();
   const pb = sim.placeBounds;
   const lines = potLines(objects, targets);
 
