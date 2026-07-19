@@ -314,11 +314,9 @@ socket.on('startGame', ({ game, layout }) => {
     // Resuming into the SAME rack: keep the watched-shot counter. Zeroing it
     // here would make the next drop re-request shots we already sat through.
     // (A genuinely new rack while we were away is safe too — the server clamps
-    // a stale index to its own shot count.) Shots that follow are the backlog:
-    // start it overhead so the whole table is visible — a starting preference,
-    // not a lock; V still cycles the view as it does for any opponent shot.
+    // a stale index to its own shot count.) The backlog that follows plays in
+    // whatever view is already selected; resuming does not reach for the camera.
     net.resuming = false;
-    camPref = 'top';
   } else if (session) {
     saveSession({ ...session, shotIndex: 0 });   // new rack → new shot numbering
   }
@@ -347,9 +345,10 @@ function applyGameState(state) {
   if (gs.winner >= 0) { $('sideMenu').classList.remove('collapsed'); openReviewPanel(); }   // game over → surface the replay controls
 
   const turnKey = `${gs.interact}:${gs.current}`;
-  // Reset my spin/charge/view at the start of my aiming turn.
+  // Reset my spin and charge at the start of my aiming turn — but NOT the
+  // camera. The view is the player's to choose and must not move on its own.
   if (gs.interact === PH_AIMING && myTurn() && !wasMyAimingTurn) {
-    resetStrikeOffset(); setPullback(0); camPref = 'aim';
+    resetStrikeOffset(); setPullback(0);
   }
   // Start of an opponent's aiming turn: snap the smoothed cue to their first
   // aim (below) instead of sweeping across the table from last turn's pose.
@@ -613,11 +612,10 @@ function loop(now) {
     }
   }
 
-  // Camera. Free (V-cycle) overrides everything. Reviewing keeps the V
-  // preference as-is — you chose to look at this. Live, overhead is forced while
-  // placing, spectating, or at game-over.
-  const forcedTop = !past && (interact === PH_PLACING || interact === PH_OVER || !myTurn());
-  const view = camPref === 'free' ? 'free' : (forcedTop ? 'top' : camPref);
+  // Camera. Your choice, always — nothing overrides it and nothing changes it
+  // behind your back. Overhead used to be forced while placing, spectating and
+  // at game-over, which meant the view moved on you every time the turn did.
+  const view = camPref;
   setViewMode(view);
   setCueVisible(interact === PH_AIMING || drawingBack());
 
@@ -627,7 +625,9 @@ function loop(now) {
   if (view === 'aim' && anchor) {
     _reviewAnchor.set(anchor.x, anchor.y, anchor.z);
     updateCueAndCamera(_reviewAnchor);
-  } else if (cuePos && interact === PH_AIMING && !past) {
+  } else if (cuePos && !past && (interact === PH_AIMING || interact === PH_PLACING)) {
+    // Also during placement: without this the aim view has no anchor on the
+    // opening break (nothing has aimed yet) and the camera would sit frozen.
     updateCueAndCamera(cuePos);
   } else {
     if (cuePos && (drawingBack() || (past && isCueVisible()))) updateCueStick(cuePos);
