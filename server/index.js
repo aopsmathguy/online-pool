@@ -467,13 +467,13 @@ function tickBot(room, dt) {
 
   if (!bot.plan || bot.plan.phase !== phase) {
     if (phase === PH_PLACING) {
-      bot.plan = { phase, t: BOT_PLACE_DELAY, pos: computeBotPlacement(sim) };
+      bot.plan = { phase, t: BOT_PLACE_DELAY, pos: computeBotPlacement(sim.readTable()) };
       if (bot.plan.pos) {
         sim.applyPlaceMove(1, bot.plan.pos.x, bot.plan.pos.z);
         broadcast(room, 'placing', sim.placingPacket());
       }
     } else {
-      const shot = computeBotShot(sim, bot.skill);
+      const shot = computeBotShot(sim.readTable(), bot.skill);
       bot.plan = { phase, t: BOT_SHOT_DELAY, shot, lastAimSent: Infinity };
       sendBotAim(room, botAimPacket(shot, 0));
     }

@@ -32,14 +32,14 @@ function playToCompletion(rulesetId) {
     const player = sim.currentPlayer();
 
     if (phase === PH_PLACING) {
-      const pos = computeBotPlacement(sim);
+      const pos = computeBotPlacement(sim.readTable());
       if (pos) sim.applyPlaceMove(player, pos.x, pos.z);
       assert.ok(sim.applyPlaceConfirm(player), 'placement confirm was rejected');
       continue;
     }
 
     assert.equal(phase, PH_AIMING, `unexpected phase ${phase} mid-game`);
-    const shot = computeBotShot(sim, 1.0);
+    const shot = computeBotShot(sim.readTable(), 1.0);
     assert.ok(shot, 'the AI failed to produce a shot');
     assert.ok(sim.applyShoot(player, shot), 'the sim rejected the AI\'s own shot');
     shots++;

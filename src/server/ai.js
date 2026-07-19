@@ -102,14 +102,6 @@ function pathClear(ax, az, bx, bz, balls, skip, width = CLEAR_FACTOR) {
   return true;
 }
 
-// Snapshot ball centres as plain {number, x, z}. balls[0] is the cue.
-function ballsXZ(sim) {
-  return sim.balls.map(b => {
-    const o = b.body.getWorldTransform().getOrigin();
-    return { number: b.number, x: o.x(), z: o.z() };
-  });
-}
-
 // Aim point + apparent opening of pocket `p` as seen from object ball `t`.
 // p1 = mouth endpoint FARTHER from the ball, p2 = the nearer one. No split cases:
 //   A = p1 + R·bisector(p1→p2, p1→ball)   — R inside the p1 jaw, angled for approach
@@ -415,14 +407,18 @@ function nearestLegal(cue, objects, targetNumbers, preferClearPath) {
 }
 
 // --- Public API -------------------------------------------------------------------
+// Both entry points take a plain-data table snapshot (RoomSim.readTable()), not
+// the sim: { balls: [{id, number, x, z}], placeBounds, phase, isBreak,
+// legalTargets }, with balls[0] the cue. This module touches no Ammo, no rules
+// object and no simulation state, so it is a pure function of that snapshot.
+//
 // Decide the bot's shot for the current position. `difficulty` in [0..1] scales
 // only the aim inaccuracy (0 = wild, 1 = near-perfect). Returns the same params
 // the client's `shoot` packet carries: { yaw, pitch, strikeX, strikeY, power }.
-export function computeBotShot(sim, difficulty = 0.5) {
-  const balls = ballsXZ(sim);
-  const cue = balls[0];
-  const objects = balls.slice(1);
-  const targets = sim.game.legalTargets();
+export function computeBotShot(table, difficulty = 0.5) {
+  const cue = table.balls[0];
+  const objects = table.balls.slice(1);
+  const targets = table.legalTargets;
   const shot = { yaw: 0, pitch: 0.06, strikeX: 0, strikeY: 0, power: 0.3 };
   const jRad = aimJitterRad(difficulty);
 
@@ -445,7 +441,7 @@ export function computeBotShot(sim, difficulty = 0.5) {
   };
 
   // Break: smash the nearest legal ball (the apex) at full power.
-  if (sim.game.isBreak()) {
+  if (table.isBreak) {
     const t = nearestLegal(cue, objects, targets, false);
     if (t) shot.yaw = Math.atan2(t.z - cue.z, t.x - cue.x) + jitter(jRad * BREAK_JITTER_SCALE);
     shot.power = MAX_POWER;
@@ -512,10 +508,10 @@ export function computeBotShot(sim, difficulty = 0.5) {
 // lineups behind each pot line's ghost ball plus random spots; among the legal
 // ones (in bounds, not touching a ball) pick the one whose BEST open shot has
 // the highest score. Returns {x, z} or null to keep the default spot.
-export function computeBotPlacement(sim) {
-  const objects = ballsXZ(sim).slice(1);
-  const targets = sim.game.legalTargets();
-  const pb = sim.placeBounds;
+export function computeBotPlacement(table) {
+  const objects = table.balls.slice(1);
+  const targets = table.legalTargets;
+  const pb = table.placeBounds;
   const lines = potLines(objects, targets);
 
   const candidates = [];

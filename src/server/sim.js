@@ -135,6 +135,26 @@ export class RoomSim {
   currentPlayer() { return this.game.getState().current; }
   phase() { return this.interact; }
 
+  // A plain-data view of the table for anything that needs to REASON about the
+  // position without touching the simulation — currently the shot chooser
+  // (ai.js). Ammo transforms, the rules object and the placement box all get
+  // flattened here, so the consumer stays a pure function of plain numbers and
+  // can be tested with literal coordinates and no physics world at all.
+  //
+  // `balls[0]` is the cue, matching this.balls.
+  readTable() {
+    return {
+      balls: this.balls.map(b => {
+        const o = b.body.getWorldTransform().getOrigin();
+        return { id: b.id, number: b.number, x: o.x(), z: o.z() };
+      }),
+      placeBounds: { ...this.placeBounds },
+      phase: this.interact,
+      isBreak: this.game.isBreak(),
+      legalTargets: this.game.legalTargets(),
+    };
+  }
+
   // Active player sets their aim; used only for relaying to the opponent.
   applyAim(playerIdx, aim) {
     if (playerIdx !== this.currentPlayer() || this.interact !== PH_AIMING) return false;

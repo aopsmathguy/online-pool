@@ -46,14 +46,14 @@ test('the server never raises a pitch the bot already legalized', () => {
 
     for (let i = 0; i < 60 && sim.phase() !== PH_OVER; i++) {
       if (sim.phase() === PH_PLACING) {
-        const pos = computeBotPlacement(sim);
+        const pos = computeBotPlacement(sim.readTable());
         if (pos) sim.applyPlaceMove(sim.currentPlayer(), pos.x, pos.z);
         sim.applyPlaceConfirm(sim.currentPlayer());
         continue;
       }
       if (sim.phase() !== PH_AIMING) break;
 
-      const shot = computeBotShot(sim, 1.0);
+      const shot = computeBotShot(sim.readTable(), 1.0);
       const played = serverPitch(sim, shot);
       assert.ok(played <= shot.pitch + 1e-12,
         `server raised the bot's pitch from ${shot.pitch} to ${played} — the stick will snap`);
@@ -74,7 +74,7 @@ test('a cue ball frozen on the cushion forces elevation, and both sides agree', 
   // Cue hard against the right cushion, shooting back up the table: the stick
   // extends out over the rail, so the floor must lift it.
   const sim = await makeSim('9ball', { cue: { x: 1.05, z: 0 }, balls: { 1: { x: 0.2, z: 0 } } });
-  const shot = computeBotShot(sim, 1.0);
+  const shot = computeBotShot(sim.readTable(), 1.0);
 
   assert.ok(shot.pitch > 0.06, `expected the floor to raise the pitch, got ${shot.pitch}`);
   assert.ok(Math.abs(serverPitch(sim, shot) - shot.pitch) <= 1e-12,
