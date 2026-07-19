@@ -68,6 +68,12 @@ const RECONNECT_GRACE_MS = 45_000;
 // while a seat is away.
 const MAX_SHOT_LOG = 40;               // cap while a seat is away
 const KEEP_RECENT = 8;                 // kept even when everyone is connected
+// Padding on the replay gate (see replayLocked). Absorbs the gap between the
+// server predicting how long a client takes to watch a shot and how long it
+// actually takes: packet flight time, the client's rAF cadence, and its own
+// deferral queue draining. It is a fudge, not a derivation — the gate is
+// wall-clock, and there is no ack. See the note on replayLocked.
+const REPLAY_SLACK_MS = 250;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function makeCode() {
   let c;
@@ -87,6 +93,28 @@ function broadcast(room, event, data) {
 function opponentOf(conn) { const r = conn.room; return r && r.seats[1 - conn.index]; }
 function emitTo(seat, event, data) { if (seat && seat.conn) seat.conn.socket.emit(event, data); }
 const anySeatAway = (room) => room.seats.some(s => !s.conn);
+
+// Publish the room's interaction state. `placing` is meaningless unless the sim
+// is actually in PH_PLACING, so the two always travel together — every caller
+// that changes phase goes through here rather than remembering the pair.
+function broadcastPhase(room) {
+  broadcast(room, 'gameState', room.sim.gameStatePacket());
+  if (room.sim.phase() === PH_PLACING) broadcast(room, 'placing', room.sim.placingPacket());
+}
+
+// Is the room still inside the window where clients are watching the last shot?
+//
+// This is the ONLY thing stopping the next shot being accepted early. applyShoot
+// resolves the whole shot synchronously, so the instant `shotAnim` leaves the
+// server the sim is already back in PH_AIMING with `current` flipped — every
+// guard inside applyShoot is satisfied for the opponent immediately. Honest
+// clients don't race it because their own gameState is deferred behind their
+// replay (see afterReplay in client/main.js), but the server must not rely on
+// that. Centralized so no future caller can forget it; performShot checks it
+// itself for the same reason.
+function replayLocked(room) {
+  return !!room.replayUntil && Date.now() < room.replayUntil;
+}
 
 // Drop shots nobody can still need. While a seat is away the whole backlog is
 // kept (up to a cap); once everyone is back only a recent window is, which is
@@ -140,8 +168,7 @@ function startMatch(room, changeGame) {
   broadcast(room, 'startGame', {
     game: gameByteFromId(info.game), firstPlayer: info.firstPlayer, layout: info.layout,
   });
-  broadcast(room, 'gameState', room.sim.gameStatePacket());
-  if (room.sim.phase() === PH_PLACING) broadcast(room, 'placing', room.sim.placingPacket());
+  broadcastPhase(room);
 }
 
 // Execute a shot (human or bot): the sim runs the whole thing to rest
@@ -150,6 +177,7 @@ function startMatch(room, changeGame) {
 // replay finishes; replayUntil stops the server accepting the next shot (or
 // the bot deciding) while everyone is still watching.
 function performShot(room, playerIdx, params) {
+  if (replayLocked(room)) return false;   // belt and braces; callers check too
   // Captured BEFORE the shot resolves: a resuming client needs the HUD state as
   // it stood when the backlog begins (names, groups, whose turn), otherwise its
   // top bar sits blank for the whole catch-up. Only worth computing when
@@ -164,14 +192,17 @@ function performShot(room, playerIdx, params) {
   if (!anim) return false;
   // Clients play a draw-back lead-in before the recorded motion, so the window
   // everyone is still watching is that much longer than the recording itself.
-  room.replayUntil = Date.now() + SHOT_STRIKE_MS + anim.durationMs + 250;
+  room.replayUntil = Date.now() + SHOT_STRIKE_MS + anim.durationMs + REPLAY_SLACK_MS;
   anim.packet.index = room.shotIndex++;
   room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
   trimShotLog(room);
   broadcast(room, 'shotAnim', anim.packet);
-  broadcast(room, 'balls', room.sim.ballsFrame());              // final resting frame
-  broadcast(room, 'gameState', room.sim.gameStatePacket());
-  if (room.sim.phase() === PH_PLACING) broadcast(room, 'placing', room.sim.placingPacket());
+  // The authoritative ball set and positions AFTER the shot resolved — which
+  // includes startPlacement having already teleported the cue ball to its
+  // ball-in-hand spot. Not the resting frame: that is the last frame of the
+  // recording, and it is what the client shows until the replay ends.
+  broadcast(room, 'balls', room.sim.ballsFrame());
+  broadcastPhase(room);
   return true;
 }
 
@@ -236,7 +267,13 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
     code: room.code, playerIndex: seatIndex, game: gameByteFromId(room.rulesetId),
     host: false, token: seat.token, bot: !!room.bot,
   });
-  const from = Math.max(0, Math.min(lastShot | 0, room.shotIndex));
+  // A client claiming to have watched MORE shots than this rack has ever had is
+  // on a stale rack: it dropped during an earlier game and a newGame reset
+  // shotIndex to 0 underneath it. Clamping down to shotIndex (the old
+  // behaviour) yields an empty backlog and silently skips every shot of the new
+  // rack. Start it from the beginning instead.
+  const watched = lastShot | 0;
+  const from = watched > room.shotIndex ? 0 : Math.max(0, watched);
   // Whatever we still have from `from` onward. If the window has already
   // dropped some, the client just sees fewer shots — never a broken one: each
   // replayed shot reconciles the rack from its own frame 0.
@@ -260,7 +297,8 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   }
 
   // The client defers these behind its replay queue, so they land only after
-  // the last missed shot has finished playing.
+  // the last missed shot has finished playing. Emitted to this socket alone
+  // rather than via broadcastPhase — the opponent is already up to date.
   conn.socket.emit('balls', sim.ballsFrame());
   conn.socket.emit('gameState', sim.gameStatePacket());
   if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());
@@ -362,7 +400,7 @@ socketServer.on('connection', (socket) => {
   socket.on('shoot', (params) => {
     const room = conn.room;
     if (!room || !room.sim) return;
-    if (room.replayUntil && Date.now() < room.replayUntil) return; // still replaying
+    if (replayLocked(room)) return;   // everyone is still watching the last shot
     performShot(room, conn.index, params);
   });
 
@@ -377,9 +415,7 @@ socketServer.on('connection', (socket) => {
   socket.on('placeConfirm', () => {
     const room = conn.room;
     if (!room || !room.sim) return;
-    if (room.sim.applyPlaceConfirm(conn.index)) {
-      broadcast(room, 'gameState', room.sim.gameStatePacket()); // interact → aiming
-    }
+    if (room.sim.applyPlaceConfirm(conn.index)) broadcastPhase(room);   // interact → aiming
   });
 
   // Reclaim a held seat after a drop/reload, and get replayed what was missed.
@@ -422,7 +458,7 @@ function botAimPacket(shot, pullback) {
 
 function tickBot(room, dt) {
   const sim = room.sim, bot = room.bot;
-  if (room.replayUntil && Date.now() < room.replayUntil) return;  // humans still watching
+  if (replayLocked(room)) return;   // humans still watching the last shot
   const phase = sim.phase();
   if (sim.currentPlayer() !== 1 || (phase !== PH_AIMING && phase !== PH_PLACING)) {
     bot.plan = null;
@@ -458,7 +494,7 @@ function tickBot(room, dt) {
   const plan = bot.plan;
   bot.plan = null;
   if (plan.phase === PH_PLACING) {
-    if (sim.applyPlaceConfirm(1)) broadcast(room, 'gameState', sim.gameStatePacket());
+    if (sim.applyPlaceConfirm(1)) broadcastPhase(room);
   } else {
     performShot(room, 1, plan.shot);
   }

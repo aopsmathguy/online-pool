@@ -272,7 +272,7 @@ export class RoomSim {
   runShotAndRecord(shot) {
     const frames = [this.captureFrame()];         // frame 0 is full (delta baseline)
     const removals = [];
-    let simT = 0, frameAcc = 0;
+    let simT = 0, frameAcc = 0, settled = false;
     while (simT < MAX_SHOT_SECONDS) {
       stepAndDamp(this.world, this.balls, FIXED_DT);
       this.scanContacts();
@@ -282,8 +282,17 @@ export class RoomSim {
         this.updatePocketMasks();
         this.checkPocketed();                     // sinks pocketed balls (not removed yet)
         frames.push(this.captureFrame(true));     // delta: moving balls only
-        if (this.ballsAtRest()) break;
+        if (this.ballsAtRest()) { settled = true; break; }
       }
+    }
+    // The cap is a safety net that should never fire. If it does, the recording
+    // is already ~3750 frames (megabytes through schemapack) and the room is
+    // locked for a minute — so say so, with the shot that caused it, and force
+    // everything to rest rather than shipping a recording that never ends.
+    if (!settled) {
+      console.warn('[sim] shot hit MAX_SHOT_SECONDS without settling — forcing rest.',
+        JSON.stringify({ shot, frames: frames.length, balls: this.balls.length }));
+      this.forceRest();
     }
     this.respotPending();      // everything has stopped → put off-table balls back
     frames.push(this.captureFrame(true));   // final resting frame incl. respots + settled cups
@@ -297,7 +306,11 @@ export class RoomSim {
     else this.interact = PH_AIMING;
     return {
       packet: { dtMs: REPLAY_FRAME_DT * 1000, shot, frames, removals },
-      durationMs: frames.length * REPLAY_FRAME_DT * 1000,
+      // N frames span N-1 intervals. Must match how the client measures the
+      // same recording (see makeShotPlayer in client/shotPlayer.js), or the
+      // two sides disagree about how long the shot lasts and the replay gate
+      // is computed from a different number than the one being waited on.
+      durationMs: Math.max(0, frames.length - 1) * REPLAY_FRAME_DT * 1000,
     };
   }
 
@@ -449,7 +462,6 @@ export class RoomSim {
   }
 
   checkPocketed() {
-    const removed = [];
     for (const b of [...this.balls]) {
       if (b.pendingSpot) continue;   // already parked; re-spotted once balls rest
       const o = b.body.getWorldTransform().getOrigin();
@@ -481,7 +493,6 @@ export class RoomSim {
         this.park(b);
       }
     }
-    return removed;
   }
 
   // A pocketed ball keeps falling into its cup DURING the shot (so the client
@@ -517,8 +528,8 @@ export class RoomSim {
   // falling forever or blocking shot resolution.
   park(b) {
     b.pendingSpot = true;
-    b.body.setGravity(new AmmoLib.btVector3(0, 0, 0));
     tmpVec3.setValue(0, 0, 0);
+    b.body.setGravity(tmpVec3);        // shared scratch vector — never allocate per call
     b.body.setLinearVelocity(tmpVec3);
     b.body.setAngularVelocity(tmpVec3);
   }
@@ -527,7 +538,8 @@ export class RoomSim {
   respotPending() {
     for (const b of this.balls) {
       if (!b.pendingSpot) continue;
-      b.body.setGravity(new AmmoLib.btVector3(0, -g, 0));   // restore normal gravity
+      tmpVec3.setValue(0, -g, 0);
+      b.body.setGravity(tmpVec3);      // restore normal gravity
       spotBall(this.world, this.balls, b, SPOT_X, SPOT_HALF);
       b.pendingSpot = false;
     }
@@ -542,6 +554,17 @@ export class RoomSim {
   ballsAtRest() {
     for (const b of this.balls) if (!this.ballRested(b)) return false;
     return true;
+  }
+
+  // Hard-stop every in-play ball. Only used when the shot time cap fires, to
+  // guarantee the recording terminates and the table is in a state the next
+  // shot can legally start from.
+  forceRest() {
+    tmpVec3.setValue(0, 0, 0);
+    for (const b of this.balls) {
+      b.body.setLinearVelocity(tmpVec3);
+      b.body.setAngularVelocity(tmpVec3);
+    }
   }
 
   ballRested(b) {
