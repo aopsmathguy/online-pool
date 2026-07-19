@@ -198,9 +198,14 @@ describe('replay + resume', { skip }, () => {
     const cuePos = `(() => { const c = window.__cuePos(); return c ? {x:+c.x.toFixed(4), z:+c.z.toFixed(4)} : null; })()`;
 
     for (let n = 0; n < 3; n++) {
-      // Settled between shots: this is the position the player aims from.
-      await b.waitFor(`!window.__replay().playing && !!window.__cuePos()`,
-        { timeout: 90_000, what: 'the table to settle between shots' });
+      // Settle in AIMING specifically. Ball-in-hand legitimately moves the cue
+      // ball anywhere on the table, so comparing across a placement measures a
+      // real move and fails on correct behaviour — which is exactly what an
+      // earlier version of this test did, reporting a 1.4m "jump" that was the
+      // bot placing after a foul. Once someone is aiming, nothing may move the
+      // ball until their shot starts.
+      await b.waitFor(`!window.__replay().playing && (window.__net.state()||{}).interact === 0 && !!window.__cuePos()`,
+        { timeout: 120_000, what: 'someone to be aiming with the table settled' });
       const settled = await b.evaluate(cuePos);
 
       // Nudge things along if it is my turn; otherwise the bot will shoot.
