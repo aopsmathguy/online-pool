@@ -218,11 +218,26 @@ export class RoomSim {
     while (simT < MAX_SHOT_SECONDS) {
       stepAndDamp(this.world, this.balls, FIXED_DT);
       this.scanContacts();
+      // Pocket handling runs EVERY substep, not once per keyframe. Both are
+      // physics questions and neither has anything to do with how often the
+      // replay happens to be sampled; running them inside the keyframe branch
+      // made them 4x coarser than the simulation and silently coupled pocketing
+      // to REPLAY_FRAME_DT, so halving the keyframe rate to save bandwidth
+      // would also have halved pocketing accuracy.
+      //
+      // updatePocketMasks is the one that actually mattered: it swaps a ball
+      // near a hole onto the triangulated felt so it CAN tip in, and running it
+      // late leaves a fast ball rolling across the pocket mouth on the flat
+      // plane, as if the hole were not there. At 8 m/s a keyframe is 128 mm of
+      // travel against a 200 mm mouth. checkPocketed only observes a ball that
+      // is already below the lip and falling, which spans many substeps — its
+      // cadence measurably changed nothing, but it belongs here for the same
+      // reason.
+      this.updatePocketMasks();
+      this.checkPocketed();                       // sinks pocketed balls (not removed yet)
       simT += FIXED_DT; frameAcc += FIXED_DT;
       if (frameAcc >= REPLAY_FRAME_DT - 1e-9) {
         frameAcc -= REPLAY_FRAME_DT;
-        this.updatePocketMasks();
-        this.checkPocketed();                     // sinks pocketed balls (not removed yet)
         rec.capture(this.poses(), { delta: true });   // moving balls only
         if (this.ballsAtRest()) { settled = true; break; }
       }
