@@ -86,6 +86,18 @@ export const packetSchemas = {
                   // the cup); `post.balls` decides what exists. Used for the
                   // review player's "sank 3, 7" labels.
                   removals: [ { id: 'uint8', frame: 'uint16' } ],
+                  // Who took it, and what was already pocketed when they did.
+                  // Carried on the packet rather than read off the client's live
+                  // state, because a shot replayed into the review list on
+                  // resume has no matching live state to read — and because it
+                  // removes the live path's reliance on `gs` still holding the
+                  // PRE-shot value at the moment playback starts.
+                  shooter: 'string',
+                  pocketedBefore: [ 'uint8' ],
+                  // TRUE = this shot is being sent only to rebuild the review
+                  // list after a reconnect; the client files it and does NOT
+                  // play it back. The player already watched it before dropping.
+                  history: 'boolean',
                   // `placing.active` is false unless the shot ended in ball-in-hand.
                   post: { state: GAME_STATE, balls: BALLS, placing: PLACING } },
   gameState:    GAME_STATE,

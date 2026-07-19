@@ -246,13 +246,11 @@ const replay = createReplayQueue({
     syncRack(balls.items);
     if (placing.active) applyPlacing(placing);
   },
-  // `gs` still holds the PRE-shot state here — `post` is only applied when the
-  // shot ENDS — so this is the shooter's chip name and the balls already
-  // pocketed before the shot (the review's pocketed-column baseline).
-  onShotStart: (anim) => {
-    const shooter = (gs.chips && gs.chips[gs.current] && gs.chips[gs.current].text) || `Player ${gs.current + 1}`;
-    recordShot(anim, shooter, gs.pocketed || []);
-  },
+  // Attribution comes off the packet, not off live state: it is correct for a
+  // shot restored into the review list on resume, where there is no matching
+  // live state, and it drops the live path's reliance on `gs` still holding the
+  // PRE-shot value at the instant playback begins.
+  onShotStart: (anim) => recordShot(anim, anim.shooter, anim.pocketedBefore),
   onShotEnd: (index) => noteShotWatched(index),   // a reload now resumes AFTER this shot
   isReviewing,
   hideCue: () => setCueVisible(false),
@@ -353,7 +351,12 @@ function applyPlacing(p) {
 // deferral, no queue, no ordering to get right.
 socket.on('gameState', applyGameState);
 socket.on('placing', applyPlacing);
-socket.on('shotAnim', (anim) => replay.push(anim));
+// A history shot is one this client already watched before it dropped: the
+// server resends it so the review list comes back whole. File it, don't play it.
+socket.on('shotAnim', (anim) => {
+  if (anim.history) recordShot(anim, anim.shooter, anim.pocketedBefore);
+  else replay.push(anim);
+});
 // The authoritative ball set, not just positions: reconcile the rack to match
 // exactly. This is what stops a ghost ball surviving past a shot — whatever the
 // client got up to during playback, this puts it back in agreement.

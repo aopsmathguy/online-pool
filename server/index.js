@@ -63,13 +63,17 @@ const httpServer = http.createServer((req, res) => {
 // a handle for the difficulty slider -- the game loop knows nothing about it.
 const rooms = new Map();
 const RECONNECT_GRACE_MS = 45_000;
-// Shot retention. A shot has to outlive the moment it was played, because a
-// client can still be watching it: someone who reloads mid-replay reports that
-// shot as unwatched and must be replayed it from the beginning. So a window of
-// recent shots is kept even while everybody is connected, and the full backlog
-// while a seat is away.
-const MAX_SHOT_LOG = 40;               // cap while a seat is away
-const KEEP_RECENT = 8;                 // kept even when everyone is connected
+// Shot retention. The log is the rack's memory, and it serves three things: a
+// client reloading mid-replay (which reports that shot as unwatched and must be
+// replayed it from the start), a returning client's catch-up backlog, and the
+// shot-review list, which a reconnecting client rebuilds ENTIRELY from here —
+// its own copy is dropped when it re-enters the rack.
+//
+// So the whole rack is kept while it is being played, not a recent window. That
+// is not free: recordings run ~166 KB of JSON each (a break can hit 775 KB), so
+// a full 21-shot rack is ~3.4 MB per room. The cap bounds the pathological case
+// rather than the normal one — a rack that reaches it has bigger problems.
+const MAX_SHOT_LOG = 60;
 // Padding on the replay gate (see replayLocked). Absorbs the gap between the
 // server predicting how long a client takes to watch a shot and how long it
 // actually takes: packet flight time, the client's rAF cadence, and its own
@@ -94,7 +98,6 @@ function broadcast(room, event, data) {
 }
 function opponentOf(conn) { const r = conn.room; return r && r.seats[1 - conn.index]; }
 function emitTo(seat, event, data) { if (seat && seat.conn) seat.conn.socket.emit(event, data); }
-const anySeatAway = (room) => room.seats.some(s => !s.conn);
 
 // Publish the room's interaction state. `placing` is meaningless unless the sim
 // is actually in PH_PLACING, so the two always travel together — every caller
@@ -118,12 +121,13 @@ function replayLocked(room) {
   return !!room.replayUntil && Date.now() < room.replayUntil;
 }
 
-// Drop shots nobody can still need. While a seat is away the whole backlog is
-// kept (up to a cap); once everyone is back only a recent window is, which is
-// what still covers a client reloading part-way through a replay.
+// Bound the log. startMatch clears it, so this only bites on a rack that runs
+// past MAX_SHOT_LOG shots; the oldest go first, and a client that resumes then
+// simply sees a shorter review list.
 function trimShotLog(room) {
-  const keep = anySeatAway(room) ? MAX_SHOT_LOG : KEEP_RECENT;
-  if (room.shotLog.length > keep) room.shotLog.splice(0, room.shotLog.length - keep);
+  if (room.shotLog.length > MAX_SHOT_LOG) {
+    room.shotLog.splice(0, room.shotLog.length - MAX_SHOT_LOG);
+  }
 }
 
 // Bot difficulty is 0-100 on the wire, 0..1 in the sim. Both the initial
@@ -195,6 +199,11 @@ function performShot(room, playerIdx, params) {
   // everyone is still watching is that much longer than the recording itself.
   room.replayUntil = Date.now() + SHOT_STRIKE_MS + anim.durationMs + REPLAY_SLACK_MS;
   anim.packet.index = room.shotIndex++;
+  // Attribution, taken from the pre-shot state: the review list needs it, and a
+  // shot restored on resume has no live state to infer it from.
+  anim.packet.shooter = (pre.chips[pre.current] && pre.chips[pre.current].text) || `Player ${pre.current + 1}`;
+  anim.packet.pocketedBefore = pre.pocketed.slice();
+  anim.packet.history = false;   // a live shot is always played, never just filed
   // The shot carries its own outcome. `balls` is the authoritative set AFTER the
   // shot resolved, which includes startPlacement having already teleported the
   // cue ball to its ball-in-hand spot — NOT the resting frame, which is the last
@@ -284,6 +293,11 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   // dropped some, the client just sees fewer shots — never a broken one: each
   // replayed shot reconciles the rack from its own frame 0.
   const missed = room.shotLog.filter(s => s.index >= from);
+  // Everything BEFORE that, which this client already watched. Re-entering the
+  // rack clears its review list (setReviewLayout), so without these the list
+  // would come back holding only the shots it missed. Sent as history: filed,
+  // not played.
+  const alreadyWatched = room.shotLog.filter(s => s.index < from);
 
   // Build the rack from the table as it stood at the START of the backlog, not
   // as it stands now: the balls sunk during those missed shots must exist as
@@ -297,6 +311,8 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   // no interleaving of state packets with recordings, and no ordering contract
   // between this loop and the client's replay queue.
   conn.socket.emit('gameState', (missed.length && missed[0].pre) || sim.gameStatePacket());
+  // Rebuild the review list first, then hand over the backlog to actually play.
+  for (const s of alreadyWatched) conn.socket.emit('shotAnim', { ...s.packet, history: true });
   for (const s of missed) conn.socket.emit('shotAnim', s.packet);
 
   // Reconcile to the present. The last shot's `post` usually covers this, but
