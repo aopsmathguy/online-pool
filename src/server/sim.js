@@ -7,22 +7,22 @@
 // the shot parameters the active client sends (yaw, pitch, strikeX, strikeY,
 // power) instead of local cue state.
 import {
-  tableW, tableH, FIXED_DT, wireY, rodR, R, m, g, RACK_QUAT,
-  e_rail, e_table, e_pocket, mu_wall, mu_ground, mu_pocket,
+  tableW, tableH, FIXED_DT, R, m, g, RACK_QUAT,
 } from '../shared/constants.js';
 import {
-  createWorld, createRigidBody, setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
-  CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, CG_SUNK, CG_FELTMESH,
+  setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
+  CG_BALL, CG_SUNK,
   MASK_BALL_NORMAL, MASK_BALL_NEAR_POCKET, MASK_SUNK,
 } from './physics.js';
-import { createPhysicsPolyline, createCylindricalCup, createFeltMesh } from './geometry.physics.js';
-import { rail_pts, felt_pts } from '../shared/table.js';
+import { buildTableWorld, railPoints } from './table.world.js';
+import { computeBounds, resolvePlacement, HEAD_STRING_X } from './placement.js';
+import { startInfo, ballsFrame, gameStatePacket, placingPacket } from './simView.js';
 import { resetRack, setBallPosition, spotBall } from './balls.logic.js';
 import { createGame } from '../shared/game.js';
 import { minPitchForShot, densify } from '../shared/clearance.js';
 import { cross, lenSq, normalize } from '../shared/vec3.js';
 import {
-  pocketPositions, POCKET_Y_THRESHOLD, isInsideAnyPocket, isNearPocket,
+  POCKET_Y_THRESHOLD, isInsideAnyPocket, isNearPocket,
 } from '../shared/pockets.js';
 import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packets.js';
 
@@ -64,58 +64,21 @@ const QUAT_EPS = 1e-3;   // per quaternion component
 const OOB_X = tableW / 2 + 0.15;
 const OOB_Z = tableH / 2 + 0.15;
 
-const PLACE_HALF_W = tableW / 2 - 2 * R;
-const PLACE_HALF_H = tableH / 2 - 2 * R;
-const HEAD_STRING_X = -tableW / 4;
 const SPOT_X = tableW * 0.25;
 const SPOT_HALF = tableW / 2 - 2 * R;
 
 // Interaction state codes come from net/packets.js (shared with the client).
 export { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER };
 
-const railPointsShared = rail_pts(tableW, tableH);
-const railClearPts = densify(railPointsShared);   // sampled rail for cue-clearance
-const feltPtsShared = felt_pts(tableW, tableH);    // felt outline (with pocket cutouts) for the trimesh
+const railClearPts = densify(railPoints);   // sampled rail for cue-clearance
 
 export class RoomSim {
   constructor(rulesetId) {
-    this.world = createWorld();
+    const { world, railPtr } = buildTableWorld();
+    this.world = world;
+    this.railPtr = railPtr;     // scanContacts identifies rail hits by this ptr
     this.balls = [];
     this.game = createGame(rulesetId, this.balls);
-
-    // Felt is modelled two ways. AWAY from pockets a ball rolls on this flat,
-    // edge-free plane (cheap, snag-free). NEAR a pocket updatePocketMasks swaps
-    // the ball onto the triangulated felt below, which has the real hole, so it
-    // rolls over the lip and tips in. The two are coplanar (y=0), so the swap
-    // never pops the ball.
-    const planeShape = new AmmoLib.btStaticPlaneShape(new AmmoLib.btVector3(0, 1, 0), 0);
-    const feltBody = createRigidBody(this.world, {
-      mass: 0, shape: planeShape, pos: { x: 0, y: 0, z: 0 }, quat: { x: 0, y: 0, z: 0, w: 1 },
-      fric: mu_ground, rest: e_table, group: CG_FELT, mask: CG_BALL,
-    });
-    feltBody.setUserIndex(3);
-
-    // Triangulated felt (real pocket holes), collided with only near a pocket.
-    const feltMesh = createFeltMesh(this.world, feltPtsShared, 0);
-    feltMesh.setUserIndex(3);
-    setBodyFilter(this.world, feltMesh, CG_FELTMESH, CG_BALL);
-
-    // Rails.
-    const railBody = createPhysicsPolyline(this.world, railPointsShared, rodR, wireY, {
-      mu: mu_wall, e: e_rail, margin: 0.0002,
-    });
-    railBody.setUserIndex(2);
-    setBodyFilter(this.world, railBody, CG_RAIL, CG_BALL);
-    this.railPtr = railBody.ptr;
-
-    // Pocket cups.
-    for (const [x, z] of pocketPositions) {
-      const cup = createCylindricalCup(this.world, 0.08, 0.4, {
-        mu: mu_pocket, e: e_pocket, pos: { x, y: -0.21, z },
-      });
-      cup.setUserIndex(4);
-      setBodyFilter(this.world, cup, CG_POCKET, CG_BALL | CG_SUNK);   // holds live + pocketed balls
-    }
 
     this.interact = PH_AIMING;
     this.acc = 0;
@@ -124,7 +87,7 @@ export class RoomSim {
     this.ballByPtr = new Map();
     this.cuePtr = 0;
     this.placePos = { x: HEAD_STRING_X, z: 0 };
-    this.placeBounds = { minX: -PLACE_HALF_W, maxX: PLACE_HALF_W, minZ: -PLACE_HALF_H, maxZ: PLACE_HALF_H };
+    this.placeBounds = computeBounds(false);
     this.placeBehindLine = false;
     this.lastAim = { yaw: 0, pitch: 0.25, strikeX: 0, strikeY: 0, pullback: 0 };
   }
@@ -364,57 +327,12 @@ export class RoomSim {
   }
 
   // --- Snapshots for the wire -------------------------------------------------
-  startInfo() {
-    return {
-      game: this.game.getRulesetId(),
-      firstPlayer: this.currentPlayer(),
-      layout: this.balls.map(b => {
-        const o = b.body.getWorldTransform().getOrigin();
-        return { id: b.id, number: b.number == null ? 255 : b.number, x: o.x(), z: o.z() };
-      }),
-    };
-  }
-
-  // Full absolute snapshot — never delta-encoded, so it also wipes out any
-  // accumulated sub-eps residue. This is the authoritative BALL SET as well as
-  // the positions: the client rebuilds its rack to match exactly, so `number`
-  // is included (255 = cue) and anything absent here is deleted client-side.
-  ballsFrame() {
-    return {
-      items: this.balls.concat(this.sunk).map(b => {
-        const t = b.body.getWorldTransform();
-        const o = t.getOrigin(), q = t.getRotation();
-        return {
-          id: b.id, number: b.number == null ? 255 : b.number,
-          x: o.x(), y: o.y(), z: o.z(), qx: q.x(), qy: q.y(), qz: q.z(), qw: q.w(),
-        };
-      }),
-    };
-  }
-
-  gameStatePacket() {
-    const m2 = this.game.getState();
-    const hud = this.game.hudView();
-    return {
-      interact: this.interact,
-      current: m2.current,
-      ballInHand: !!m2.ballInHand,
-      winner: m2.winner == null ? -1 : m2.winner,
-      message: m2.message || '',
-      status: hud.status || '',
-      chips: hud.chips.map(c => ({ text: c.text, active: !!c.active })),
-      pocketed: this.pocketedList.slice(),
-    };
-  }
-
-  placingPacket() {
-    return {
-      active: this.interact === PH_PLACING,
-      player: this.currentPlayer(),
-      behindLine: this.placeBehindLine,
-      x: this.placePos.x, z: this.placePos.z,
-    };
-  }
+  // Built in simView.js so the whole wire format sits in one place. Kept as
+  // methods because they are how the server asks the sim about itself.
+  startInfo() { return startInfo(this); }
+  ballsFrame() { return ballsFrame(this); }
+  gameStatePacket() { return gameStatePacket(this); }
+  placingPacket() { return placingPacket(this); }
 
   // --- Internals (ported from main.js) ---------------------------------------
   rebuildBallPtrMap() {
@@ -576,37 +494,26 @@ export class RoomSim {
     return true;
   }
 
-  clampToBounds() {
-    const pb = this.placeBounds, pp = this.placePos;
-    pp.x = Math.max(pb.minX, Math.min(pb.maxX, pp.x));
-    pp.z = Math.max(pb.minZ, Math.min(pb.maxZ, pp.z));
-  }
-
-  clampAndResolvePlace() {
-    this.clampToBounds();
-    const pp = this.placePos;
+  // Object-ball centres, as the plain {x, z} pairs placement.js works in.
+  objectBallsXZ() {
+    const out = [];
     for (const b of this.balls) {
       if (b.style === 'cue') continue;
       const o = b.body.getWorldTransform().getOrigin();
-      let dx = pp.x - o.x(), dz = pp.z - o.z();
-      let d = Math.hypot(dx, dz);
-      const minD = 2 * R + 0.001;
-      if (d < minD) {
-        if (d < 1e-6) { dx = 1; dz = 0; d = 1; }
-        pp.x = o.x() + (dx / d) * minD;
-        pp.z = o.z() + (dz / d) * minD;
-      }
+      out.push({ x: o.x(), z: o.z() });
     }
-    this.clampToBounds();
+    return out;
+  }
+
+  // Snap this.placePos to the nearest legal spot for the current bounds.
+  clampAndResolvePlace() {
+    this.placePos = resolvePlacement(this.placePos, this.placeBounds, this.objectBallsXZ());
   }
 
   startPlacement({ behindLine = false } = {}) {
     this.interact = PH_PLACING;
     this.placeBehindLine = behindLine;
-    this.placeBounds = {
-      minX: -PLACE_HALF_W, maxX: behindLine ? HEAD_STRING_X : PLACE_HALF_W,
-      minZ: -PLACE_HALF_H, maxZ: PLACE_HALF_H,
-    };
+    this.placeBounds = computeBounds(behindLine);
     // Start the placement from wherever the cue ball was left, not a fixed
     // spot: after a non-scratch foul that's exactly where it came to rest;
     // after a scratch the body is down a pocket (or off the table), so the
