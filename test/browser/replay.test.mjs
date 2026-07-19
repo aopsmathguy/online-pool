@@ -83,20 +83,23 @@ describe('replay + resume', { skip }, () => {
     // Arm on any shot that pockets something, then reload only while it is
     // BOTH on screen and unwatched — otherwise there is no backlog on resume
     // and the test proves nothing.
-    await b.evaluate(`
-      window.__armed = null;
-      window.__net.socket.on('shotAnim', (a) => {
-        if (!a.history && a.removals && a.removals.length) {
-          window.__armed = { index: a.index, id: a.removals[0].id };
-        }
-      });
-    `);
-
+    // A fresh rack, broken hard by us: a break pots something far more often
+    // than fouling and hoping the bot obliges, and it needs no shared state
+    // from earlier tests. Retry on a new rack if a break happens not to pot.
     let caught = null;
-    for (let round = 0; round < 8 && !caught; round++) {
-      // Foul on purpose so the bot takes the table and runs shots.
-      await b.evaluate(`window.__armed = null;
-        window.__net.socket.emit('shoot', {yaw:3.14,pitch:0.06,strikeX:0,strikeY:0,power:0.12})`);
+    for (let round = 0; round < 4 && !caught; round++) {
+      await b.freshGame();
+      await b.evaluate(`
+        window.__armed = null;
+        window.__net.socket.on('shotAnim', (a) => {
+          if (!a.history && a.removals && a.removals.length) {
+            window.__armed = { index: a.index, id: a.removals[0].id };
+          }
+        });
+        window.__net.socket.emit('placeConfirm', {});
+      `);
+      await sleep(500);
+      await b.evaluate(`window.__net.socket.emit('shoot', {yaw:0.02,pitch:0.06,strikeX:0,strikeY:0,power:0.825})`);
       for (let i = 0; i < 120 && !caught; i++) {
         await sleep(200);
         caught = await b.evaluate(`(() => {
@@ -140,6 +143,7 @@ describe('replay + resume', { skip }, () => {
   test('the review list survives a reload, as labels, fetched on demand', async () => {
     await b.waitFor(`window.__reviewHistory().length > 0`,
       { timeout: 30_000, what: 'shots to accumulate in the review list' });
+    await b.waitFor(`!window.__replay().playing`, { timeout: 60_000, what: 'the table to settle' });
     const before = await snap(b);
 
     await b.reload();
@@ -196,6 +200,7 @@ describe('replay + resume', { skip }, () => {
     // shooting. Waiting for my turn would also be slow -- the bot can run the
     // table for a while.
     const cuePos = `(() => { const c = window.__cuePos(); return c ? {x:+c.x.toFixed(4), z:+c.z.toFixed(4)} : null; })()`;
+    await b.freshGame();   // don't inherit a finished game from an earlier test
 
     for (let n = 0; n < 3; n++) {
       // Settle in AIMING specifically. Ball-in-hand legitimately moves the cue

@@ -122,6 +122,25 @@ export async function launch({ query = '', width = 1280, height = 800 } = {}) {
         `typeof window.__preReload === 'undefined' && !!window.__net && !!window.__replay`,
         { timeout, what: 'the reloaded document to finish booting' });
     },
+    /**
+     * Start a brand-new game on a clean slate.
+     *
+     * Tests share one browser and one server, so game state carries between
+     * them: a test that leaves the game FINISHED makes every later test that
+     * waits for a turn hang until it times out. (That is not hypothetical — it
+     * cascaded here, turning one flaky failure into two.) Clearing the session
+     * and reloading with ?bot gives each test a fresh rack it can rely on.
+     */
+    async freshGame({ timeout = 40_000 } = {}) {
+      await page.evaluate(`window.__preReload = 1; sessionStorage.clear();`);
+      await page.evaluate(`location.href = 'http://localhost:${port}/?bot'`);
+      await handle.waitFor(
+        `typeof window.__preReload === 'undefined' && !!window.__net && window.__net.me().inGame`,
+        { timeout, what: 'a fresh game to start' });
+      // The opening break is mine and starts in ball-in-hand.
+      await handle.waitFor(`(window.__net.state()||{}).interact === 2`,
+        { timeout, what: 'the break placement' });
+    },
     async close() {
       try { page.ws.close(); } catch {}
       try { chrome.kill(); } catch {}
