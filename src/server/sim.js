@@ -1,13 +1,16 @@
 // src/sim.js — one authoritative pool simulation per room (server-side).
 //
 // This is the orchestration from the old client main.js, ported to run headless
-// on the server against an instanced world + balls + game. All physics/rules
-// math is identical; only rendering/input is gone. The shot-impulse math that
-// used THREE vectors + cue.js is reproduced here with plain scalars, driven by
-// the shot parameters the active client sends (yaw, pitch, strikeX, strikeY,
-// power) instead of local cue state.
+// on the server against an instanced world + balls + game. Only rendering and
+// input are gone.
+//
+// RoomSim owns the Ammo world and the ball array for one room, validates player
+// actions against the current phase, and runs a shot to rest. It delegates the
+// things that are not about owning a world: strike math (strike.js), replay
+// encoding (shotRecorder.js), placement geometry (placement.js), wire format
+// (simView.js) and world construction (table.world.js).
 import {
-  tableW, tableH, FIXED_DT, R, m, g, RACK_QUAT,
+  tableW, tableH, FIXED_DT, R, g, RACK_QUAT,
 } from '../shared/constants.js';
 import {
   setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
@@ -17,29 +20,16 @@ import {
 import { buildTableWorld, railPoints } from './table.world.js';
 import { computeBounds, resolvePlacement, HEAD_STRING_X } from './placement.js';
 import { startInfo, ballsFrame, gameStatePacket, placingPacket } from './simView.js';
+import { resolveStrike } from './strike.js';
 import { resetRack, setBallPosition, spotBall } from './balls.logic.js';
 import { createGame } from '../shared/game.js';
-import { minPitchForShot, densify } from '../shared/clearance.js';
-import { cross, lenSq, normalize } from '../shared/vec3.js';
+import { densify } from '../shared/clearance.js';
 import {
   POCKET_Y_THRESHOLD, isInsideAnyPocket, isNearPocket,
 } from '../shared/pockets.js';
 import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packets.js';
 
 // --- Tunables ---------------------------------------------------------------
-export const SHOT_IMPULSE_PER_M = 8.0;   // launch speed (m/s) per metre of pullback; ai.js reads this
-const SPIN_GAIN = 1.0;
-const MISCUE_LIMIT = 0.5;
-const BALL_INERTIA = 0.4 * m * R * R;
-
-// Squirt (cue-ball deflection): side english makes the ball leave a few degrees
-// off the aim line, AWAY from the english side. Physically this is a small
-// cue-endmass effect — NOT the full contact-normal deflection a free tip would
-// give (that overshoots to ~30°) — so we model it directly as a small angular
-// deflection of the launch direction proportional to horizontal english.
-// SQUIRT_MAX_TAN = tan(max squirt angle) at full english (|strikeX| = 1).
-const SQUIRT_MAX_TAN = 0.085;   // ≈ 4.9° at full english
-
 const LIN_REST = 0.01;   // m/s
 const ANG_REST = 0.20;   // rad/s
 
@@ -170,52 +160,16 @@ export class RoomSim {
     this.acc = 0;
     cue.activate();
 
-    // Authoritative cue-elevation floor: raise the pitch to clear any ball/rail
-    // behind the cue ball, regardless of what the client sent.
     const co = cue.getWorldTransform().getOrigin();
-    const obstacles = [];
-    for (let i = 1; i < this.balls.length; i++) {
-      const o = this.balls[i].body.getWorldTransform().getOrigin();
-      obstacles.push({ x: o.x(), z: o.z() });
-    }
-    const minPitch = minPitchForShot(co.x(), co.z(), p.yaw, p.strikeY, obstacles, railClearPts);
-    const pitch = Math.max(p.pitch, minPitch);
-
-    // Cue direction (back→tip, includes pitch) and the pitched stick frame:
-    // `right` is horizontal ⟂ to aim, `stickUp` completes the frame.
-    const cy = Math.cos(p.yaw), syaw = Math.sin(p.yaw);
-    const cp = Math.cos(pitch), sp = Math.sin(pitch);
-    const dir = { x: cy * cp, y: -sp, z: syaw * cp };
-    let right = cross(dir, { x: 0, y: 1, z: 0 });
-    if (lenSq(right) < 1e-8) right = { x: 0, y: 0, z: 1 };
-    right = normalize(right);
-    const stickUp = normalize(cross(right, dir));
-
-    // Squirt: deflect the LAUNCH direction a few degrees away from the english
-    // side (opposite to `right·strikeX`), leaving the spin computation on the
-    // true cue line so english itself is unchanged. Follow/draw (strikeY) does
-    // not squirt. Renormalize so speed is unaffected.
-    const squirt = -p.strikeX * SQUIRT_MAX_TAN;
-    const shotDir = normalize({
-      x: dir.x + right.x * squirt, y: dir.y + right.y * squirt, z: dir.z + right.z * squirt,
+    const { pitch, impulse, angVel } = resolveStrike(p, {
+      cue: { x: co.x(), z: co.z() },
+      obstacles: this.objectBallsXZ(),
+      railPts: railClearPts,
     });
 
-    const Jmag = p.power * SHOT_IMPULSE_PER_M * m;
-    tmpVec3.setValue(shotDir.x * Jmag, shotDir.y * Jmag, shotDir.z * Jmag);
+    tmpVec3.setValue(impulse.x, impulse.y, impulse.z);
     cue.applyCentralImpulse(tmpVec3);
-
-    // Spin from the off-centre strike: ω = (contact × dir)·(Jmag·SPIN_GAIN / I),
-    // using the true cue line `dir` (not the squirted direction).
-    const sxOff = p.strikeX * R * MISCUE_LIMIT, syOff = p.strikeY * R * MISCUE_LIMIT;
-    const backDist = Math.sqrt(Math.max(0, R * R - sxOff * sxOff - syOff * syOff));
-    const contact = {
-      x: right.x * sxOff + stickUp.x * syOff - dir.x * backDist,
-      y: right.y * sxOff + stickUp.y * syOff - dir.y * backDist,
-      z: right.z * sxOff + stickUp.z * syOff - dir.z * backDist,
-    };
-    const spin = cross(contact, dir);
-    const k = Jmag * SPIN_GAIN / BALL_INERTIA;
-    tmpVec3.setValue(spin.x * k, spin.y * k, spin.z * k);
+    tmpVec3.setValue(angVel.x, angVel.y, angVel.z);
     cue.setAngularVelocity(tmpVec3);
 
     // Simulate the whole shot to rest RIGHT NOW and hand back the recording.

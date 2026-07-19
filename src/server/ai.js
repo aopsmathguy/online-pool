@@ -45,8 +45,8 @@ import {
   tableW, tableH, R, g, mu_felt_linear, rodR, wireY,
 } from '../shared/constants.js';
 import { rail_pts } from '../shared/table.js';
-import { SHOT_IMPULSE_PER_M } from './sim.js';
-import { minPitchForShot, densify } from '../shared/clearance.js';
+import { SHOT_IMPULSE_PER_M } from './strike.js';
+import { legalPitch, densify } from '../shared/clearance.js';
 import { POCKET_MOUTHS as POCKETS } from '../shared/pockets.js';
 
 // --- Tunables -----------------------------------------------------------------
@@ -231,7 +231,7 @@ function bestShot(cue, shots) {
 // Power for a pot: arrive at the pocket still rolling (margin), work backwards
 // through the collision (target gets ≈ cutCos of the cue speed) and the felt
 // drag over the cue's run-up. power is the client-side pullback in metres;
-// launch speed = power * SHOT_IMPULSE_PER_M (see applyShoot in sim.js).
+// launch speed = power * SHOT_IMPULSE_PER_M (see resolveStrike in strike.js).
 function potPower({ dCue, dPocket, cutCos }) {
   const vPocket = Math.sqrt(2 * A_FELT * dPocket) * POCKET_SPEED_MARGIN;
   const vContact = vPocket / Math.max(cutCos, 0.25);
@@ -427,13 +427,19 @@ export function computeBotShot(sim, difficulty = 0.5) {
   const jRad = aimJitterRad(difficulty);
 
   // Legal cue elevation: with a ball or the rail cushion behind the cue ball,
-  // the stick must be jacked up to clear it — the same floor the server
-  // enforces in applyShoot. Raise the pitch ourselves (so the plan, the shot
-  // and the streamed aim all agree) and compensate the power for the reduced
-  // horizontal component of the launch direction.
+  // the stick must be jacked up to clear it. This is the SAME call the server
+  // makes inside resolveStrike, on the same obstacle list and the same rail
+  // sampling, so the floor we compute here is the floor the server will
+  // enforce — the plan, the streamed aim and the shot all agree, and the server
+  // never silently raises the pitch after the human has watched the cue line up.
+  //
+  // Always called last, once yaw and strikeY are final, for exactly that reason.
+  // Power is compensated for the reduced horizontal component of the launch.
   const legalize = () => {
-    const minP = minPitchForShot(cue.x, cue.z, shot.yaw, shot.strikeY, objects, RAIL_CLEAR_PTS);
-    shot.pitch = Math.max(shot.pitch, minP + 0.01);
+    shot.pitch = legalPitch(shot.pitch, {
+      cx: cue.x, cz: cue.z, yaw: shot.yaw, strikeY: shot.strikeY,
+      obstacles: objects, railPts: RAIL_CLEAR_PTS,
+    });
     shot.power = clamp(shot.power / Math.max(0.4, Math.cos(shot.pitch)), MIN_POWER, MAX_POWER);
     return shot;
   };

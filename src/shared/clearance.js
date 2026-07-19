@@ -64,3 +64,19 @@ export function minPitchForShot(cx, cz, yaw, strikeY, ballsXZ, railPts) {
 
   return Math.atan(maxTan);
 }
+
+// The pitch a shot will ACTUALLY be played at: what was asked for, raised to
+// the clearance floor if it was too low.
+//
+// Every consumer of the floor goes through here — the client's aim preview, the
+// server's authoritative strike, and the bot's shot planner. They used to each
+// call minPitchForShot themselves, and because the bot derived its obstacle
+// list slightly differently from the server's, its computed floor could come
+// out a hair below the server's; the server would then silently raise the pitch
+// AFTER the bot's aim had been streamed to the human, and the cue stick would
+// visibly snap. The bot compensated with a hardcoded `+ 0.01` of slop. Feeding
+// all three from one function is what let that slop be deleted — so keep them
+// on the same inputs.
+export function legalPitch(requested, { cx, cz, yaw, strikeY, obstacles, railPts }) {
+  return Math.max(requested, minPitchForShot(cx, cz, yaw, strikeY, obstacles, railPts));
+}

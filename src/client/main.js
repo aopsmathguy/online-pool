@@ -21,7 +21,7 @@ import {
   getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
 } from './balls.view.js';
 import { makeShotPlayer, openingBalls } from './shotPlayer.js';
-import { minPitchForShot, densify } from '../shared/clearance.js';
+import { legalPitch, densify } from '../shared/clearance.js';
 import { renderHUD } from './hud.js';
 import { initHud, drawHud, clearHud } from './hudCanvas.js';
 import {
@@ -611,8 +611,12 @@ function loop(now) {
         // Enforce cue elevation: raise pitch to clear any ball/rail behind the
         // cue ball along the current aim (the player can't dip below it).
         if (cuePos) {
-          const minP = minPitchForShot(cuePos.x, cuePos.z, getYaw(), getStrikeOffset().y, getObstaclePositions(), railPoints);
-          if (getPitch() < minP) setPitch(minP);
+          // Same call the server makes authoritatively inside resolveStrike, so
+          // what the player sees here is what the shot will actually be played at.
+          setPitch(legalPitch(getPitch(), {
+            cx: cuePos.x, cz: cuePos.z, yaw: getYaw(), strikeY: getStrikeOffset().y,
+            obstacles: getObstaclePositions(), railPts: railPoints,
+          }));
         }
         maybeSendAim(now);
       } else {
