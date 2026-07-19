@@ -182,6 +182,44 @@ describe('replay + resume', { skip }, () => {
     assertInvariant(await snap(b), 'after reviewing');
   }, { timeout: 180_000 });
 
+  test('the cue ball does not move between shots and the next strike', async () => {
+    // Regression: every shot's `post` carries a `placing` packet whether or not
+    // the game is placing, and an inactive one still reports coordinates --
+    // placingPacket sends sim.placePos, which keeps the LAST ball-in-hand
+    // position long after it means anything. Honouring that moved the cue ball
+    // to a stale spot after every shot: you aimed from the wrong place, and the
+    // shot's own frames put it back, reading as a teleport at the strike. It
+    // made aiming impossible, and nothing else here saw it.
+    //
+    // Checked across ANY shot rather than only my own: the invariant is that
+    // the ball at rest is where the next recording starts it, whoever is
+    // shooting. Waiting for my turn would also be slow -- the bot can run the
+    // table for a while.
+    const cuePos = `(() => { const c = window.__cuePos(); return c ? {x:+c.x.toFixed(4), z:+c.z.toFixed(4)} : null; })()`;
+
+    for (let n = 0; n < 3; n++) {
+      // Settled between shots: this is the position the player aims from.
+      await b.waitFor(`!window.__replay().playing && !!window.__cuePos()`,
+        { timeout: 90_000, what: 'the table to settle between shots' });
+      const settled = await b.evaluate(cuePos);
+
+      // Nudge things along if it is my turn; otherwise the bot will shoot.
+      await b.evaluate(`(() => {
+        const s = window.__net.state() || {};
+        if (s.current !== 0) return;
+        if (s.interact === 2) { window.__net.socket.emit('placeConfirm', {}); return; }
+        if (s.interact === 0) window.__net.socket.emit('shoot', {yaw:${0.7 + n},pitch:0.06,strikeX:0,strikeY:0,power:0.45});
+      })()`);
+
+      await b.waitFor(`window.__replay().playing`, { timeout: 90_000, what: 'the next shot to start' });
+      const atStrike = await b.evaluate(cuePos);
+      const drift = Math.hypot(atStrike.x - settled.x, atStrike.z - settled.z);
+      assert.ok(drift < 0.01,
+        `cue ball jumped ${drift.toFixed(4)}m between resting and the next strike `
+        + `(${JSON.stringify(settled)} -> ${JSON.stringify(atStrike)}) — it is not where you aim from`);
+    }
+  }, { timeout: 240_000 });
+
   test('the page reported no errors throughout', async () => {
     const s = await snap(b);
     const errs = realErrors(s.errors);

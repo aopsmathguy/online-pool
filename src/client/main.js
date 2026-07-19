@@ -350,10 +350,12 @@ function applyGameState(state) {
   const wasMyAimingTurn = prevTurnKey === `${PH_AIMING}:${net.myIndex}`;
   const wasPlacing = gs.interact === PH_PLACING;
   gs = state;
-  // Ball-in-hand is a whole-table decision, so start it overhead — for either
-  // player, since watching someone place is table-wide too. A NUDGE, not a
-  // lock: V still cycles to any view and nothing forces it back.
-  if (gs.interact === PH_PLACING && !wasPlacing) camPref = 'top';
+  // MY ball-in-hand starts overhead (it is a whole-table decision) and drops
+  // back to aim once I have placed it. Both are NUDGES, not locks: V still
+  // cycles to any view and nothing forces it back. The opponent's placement
+  // never touches the camera — their turn is not a reason to move my view.
+  if (myTurn() && gs.interact === PH_PLACING && !wasPlacing) camPref = 'top';
+  if (myTurn() && gs.interact === PH_AIMING && wasPlacing) camPref = 'aim';
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
   placeBotSlider();               // re-attach the difficulty slider to the bot chip
   if (gs.winner >= 0) { $('sideMenu').classList.remove('collapsed'); openReviewPanel(); }   // game over → surface the replay controls

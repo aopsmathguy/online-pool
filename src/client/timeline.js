@@ -128,15 +128,21 @@ export function createTimeline({
     }
     if (balls) live.balls = balls;
     if (placing) {
-      live.placing = placing;
-      // Keep live.balls in step. Placement moves the cue ball but the server
-      // sends no `balls` packet for it, so the stored set still has the ball
-      // where the last shot left it. renderLive() syncs the rack from that set
-      // on every adopt, so without this the ball snaps back to its old spot the
-      // moment placement ends (placeConfirm sends gameState alone) — and then
-      // jumps to where it was actually placed when the shot's frame 0 lands.
-      const cue = live.balls && live.balls.items.find(b => b.id === 0);
-      if (cue) { cue.x = placing.x; cue.z = placing.z; }
+      // ONLY an active placement counts. Every shot's `post` carries a placing
+      // packet whether or not the game is placing, and an inactive one still
+      // reports coordinates — placingPacket sends sim.placePos, which keeps the
+      // LAST ball-in-hand position long after it stopped meaning anything.
+      // Treating that as a position moved the cue ball to a stale spot after
+      // every single shot: you aimed from the wrong place, and the shot's own
+      // frames put the ball back, reading as a teleport at the strike.
+      live.placing = placing.active ? placing : null;
+      if (placing.active && live.balls) {
+        // Placement moves the cue ball but the server sends no `balls` packet
+        // for it (placeConfirm sends gameState alone), so patch the stored set
+        // or renderLive() syncs the rack back to where the last shot left it.
+        const cue = live.balls.items.find(b => b.id === 0);
+        if (cue) { cue.x = placing.x; cue.z = placing.z; }
+      }
     }
     if (isLive()) renderLive();
   }
