@@ -106,11 +106,8 @@ export function beginAimOrbit() {
   const pz = _lastLook.z + fz * past;
   const ox = cx - px, oy = cy - py, oz = cz - pz;   // pivot → eye
   const radius = Math.hypot(ox, oy, oz);
-  // Radius isn't stored: it's recomputed live from the sighting eye→pivot
-  // distance each frame, so a SIMULTANEOUS pinch-zoom (which dollies camDist,
-  // moving the sighting eye) shows up in the orbit as well.
   aimOrbit = {
-    px, py, pz,
+    px, py, pz, radius,
     azimuth: Math.atan2(oz, ox),
     elevation: Math.asin(clamp(oy / radius, -1, 1)),
     returning: false,
@@ -514,13 +511,11 @@ export function placeCamera() {
         return;
       }
     } else {
-      // Live orbit: swing around the fixed pivot, keeping it centred. The radius
-      // tracks the live sighting eye→pivot distance, so a simultaneous pinch-zoom
-      // (which dollies camDist) is reflected here too. Record the pose's offset
-      // from the sighting pose so a release decays from exactly here.
-      const r = Math.hypot(_aimEye.x - aimOrbit.px, _aimEye.y - aimOrbit.py, _aimEye.z - aimOrbit.pz);
+      // Live orbit: swing around the fixed pivot, keeping it centred. Record the
+      // pose's offset from the sighting pose so a release decays from exactly here.
       const ce = Math.cos(aimOrbit.elevation), se = Math.sin(aimOrbit.elevation);
       const ca = Math.cos(aimOrbit.azimuth),  sa = Math.sin(aimOrbit.azimuth);
+      const r = aimOrbit.radius;
       const ex = aimOrbit.px + r * ce * ca, ey = aimOrbit.py + r * se, ez = aimOrbit.pz + r * ce * sa;
       aimOrbit.offEye.set(ex - _aimEye.x, ey - _aimEye.y, ez - _aimEye.z);
       aimOrbit.offLook.set(aimOrbit.px - _lastLook.x, aimOrbit.py - _lastLook.y, aimOrbit.pz - _lastLook.z);

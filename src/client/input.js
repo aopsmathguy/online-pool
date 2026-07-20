@@ -156,25 +156,30 @@ export function bindInput(canvas, handlers) {
     if (pinch && pointers.size >= 2) {
       const rect = canvas.getBoundingClientRect();
       const info = pinchInfo(rect);
-      if (getViewMode() === 'aim') {
-        // Aim view runs pinch-zoom and orbit TOGETHER, no either/or: the finger
-        // separation dollies the camera (persistent) while the midpoint swings it
-        // around the pivot (a shot-line preview that glides back on lift).
-        if (!isAimOrbiting()) beginAimOrbit();
-        dragAimOrbit(info.midX - pinch.midX, info.midY - pinch.midY);
-        pinchAim(info.dist, pinch.dist);
-      } else {
-        // Overhead view keeps them separate: classify the gesture once (fingers
-        // changing separation → zoom; midpoint sliding → pan) and lock to it so
-        // jitter in the other axis can't bleed in.
-        if (!pinchMode) {
-          const dDist = Math.abs(info.dist - pinchStart.dist);
-          const dMid  = Math.hypot(info.midX - pinchStart.midX, info.midY - pinchStart.midY);
-          if (Math.max(dDist, dMid) >= GESTURE_SLOP) pinchMode = dDist >= dMid ? 'zoom' : 'drag';
+      // Tell a PINCH (fingers change separation → zoom) from a two-finger DRAG
+      // (midpoint slides while separation holds → pan). Whichever axis moves more
+      // past the slop wins, then the gesture is locked to it so jitter in the
+      // other axis can't bleed in (a drag no longer creeps the zoom, and vice versa).
+      if (!pinchMode) {
+        const dDist = Math.abs(info.dist - pinchStart.dist);
+        const dMid  = Math.hypot(info.midX - pinchStart.midX, info.midY - pinchStart.midY);
+        if (Math.max(dDist, dMid) >= GESTURE_SLOP) {
+          pinchMode = dDist >= dMid ? 'zoom' : 'drag';
+          // Open the orbit fresh the moment a drag is recognised — even mid glide-
+          // back from a previous one — so a re-grab starts from the live view.
+          if (pinchMode === 'drag' && getViewMode() === 'aim') beginAimOrbit();
         }
-        // Zoom about the finger midpoint (prevMid == mid, so no pan contribution).
-        if (pinchMode === 'zoom') pinchTop(info.midX, info.midY, info.midX, info.midY, info.dist, pinch.dist, rect.width, rect.height);
-        else if (pinchMode === 'drag') dragPanTop(info.midX - pinch.midX, info.midY - pinch.midY, rect.height);
+      }
+      if (pinchMode === 'zoom') {
+        // Pinch: aim slides the camera along the stick; overhead zooms about the
+        // finger midpoint (prevMid == mid, so no pan contribution).
+        if (getViewMode() === 'aim') pinchAim(info.dist, pinch.dist);
+        else pinchTop(info.midX, info.midY, info.midX, info.midY, info.dist, pinch.dist, rect.width, rect.height);
+      } else if (pinchMode === 'drag') {
+        // Two-finger drag: overhead pans by the midpoint delta; aim orbits a fixed
+        // pivot out past the aim point (a shot-line preview that snaps back on lift).
+        if (getViewMode() === 'top') dragPanTop(info.midX - pinch.midX, info.midY - pinch.midY, rect.height);
+        else if (getViewMode() === 'aim') dragAimOrbit(info.midX - pinch.midX, info.midY - pinch.midY);
       }
       pinch = info;
       return;
