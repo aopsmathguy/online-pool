@@ -3,8 +3,8 @@
 // re-exported here so existing client imports keep working. The physics builders
 // moved to geometry.physics.js.
 import * as THREE from "/lib/three.module.js";
-import { table_parts, rail_solid, RAIL_FACES, cabinet_section, table_top_outline } from '../shared/table.js';
-import { pocketWireY, cabinetDeckThickness } from '../shared/constants.js';
+import { table_parts, rail_solid, RAIL_FACES, cabinet_section, table_top_outline, pocket_positions } from '../shared/table.js';
+import { pocketWireY, cabinetDeckThickness, inset, cabinetRTop } from '../shared/constants.js';
 export { rail_pts, felt_pts, pocket_positions, table_parts } from '../shared/table.js';
 
 export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
@@ -202,6 +202,41 @@ function feltMaterial() {
       return mat;
 }
 
+// Scanned oak table wood (assets/wood/) for the cabinet, replacing the old flat
+// brown. Same idea as the felt: the colour lives IN the photo, so the material
+// tints white and lets the roughness map carry the sheen of the grain. Only the
+// diffuse and roughness maps ship — the source set's normal is an EXR (needs a
+// separate loader) and its displacement is useless on the two-ring skirt.
+//
+// UVs on both the skirt and the deck are in METRES, so WOOD_REPEAT is "tiles per
+// metre". The scan's authored density is 109.2 px/cm, so a 4096-px tile spans
+// 4096 / 109.2 = 37.5 cm — deriving the repeat from that pins the grain to its
+// real-world scale rather than a guessed number.
+const WOOD_PX = 4096;
+const WOOD_PX_PER_CM = 109.2;
+const WOOD_TILE_METRES = WOOD_PX / WOOD_PX_PER_CM / 100;   // ≈ 0.375 m
+const WOOD_REPEAT = 1 / WOOD_TILE_METRES;                  // ≈ 2.666 tiles/m
+const WOOD_MAPS = {
+      map:          '/assets/wood/color.jpg',
+      roughnessMap: '/assets/wood/roughness.jpg',
+};
+let woodTextures = null;
+function makeWoodTextures() {
+      if (woodTextures) return { ...woodTextures };
+      const loader = new THREE.TextureLoader();
+      const out = {};
+      for (const [slot, url] of Object.entries(WOOD_MAPS)) {
+        const tex = loader.load(url);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(WOOD_REPEAT, WOOD_REPEAT);
+        tex.anisotropy = 8;
+        if (slot === 'map') tex.colorSpace = THREE.SRGBColorSpace;
+        out[slot] = tex;
+      }
+      woodTextures = out;
+      return { ...out };
+}
+
 export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       if (!points || points.length < 3) throw new Error("Need ≥3 points");
       const {
@@ -212,6 +247,7 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
         castShadow = false,
         holes = [],
         felt = false,        // add the woven-felt grain (the green table cloth)
+        wood = false,        // add the scanned oak grain (the cabinet)
       } = options;
 
       const shape = new THREE.Shape();
@@ -247,6 +283,11 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
         mat.color.set(0xffffff);          // the baize photo IS the colour
         mat.roughness = 1.0;              // roughnessMap multiplies this
         mat.normalScale = new THREE.Vector2(0.6, 0.6);
+      }
+      if (wood) {
+        Object.assign(mat, makeWoodTextures());
+        mat.color.set(0xffffff);          // the wood photo IS the colour
+        mat.roughness = 1.0;              // roughnessMap multiplies this
       }
 
       const mesh = new THREE.Mesh(geom, mat);
@@ -287,17 +328,33 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
       const mat = new THREE.MeshStandardMaterial({
         color, roughness, metalness: 0.0, side: THREE.DoubleSide, flatShading: false,
       });
+      // The wood photo IS the colour; the roughness map carries the grain's sheen.
+      Object.assign(mat, makeWoodTextures());
+      mat.color.set(0xffffff);
+      mat.roughness = 1.0;
 
       // --- skirt ---------------------------------------------------------
       const top = cabinet_section(tableW, tableH, rTop, segments);
       const bot = cabinet_section(tableW, tableH, rBottom, segments);
       const n = top.length;
 
+      // UVs in METRES so the wood tiles at the same tiles-per-metre as the deck:
+      // U runs the cumulative arc length around the skirt, V is the vertical face.
+      // The ring closes with a single back seam at the wrap, which the wood's
+      // RepeatWrapping absorbs.
       const pos = [];
+      const uv = [];
       const idx = [];
+      let arc = 0;
       for (let i = 0; i < n; i++) {
+        if (i > 0) {
+          const dx = top[i][0] - top[i - 1][0], dz = top[i][1] - top[i - 1][1];
+          arc += Math.hypot(dx, dz);
+        }
         pos.push(top[i][0], yTop, top[i][1]);
         pos.push(bot[i][0], yBottom, bot[i][1]);
+        uv.push(arc, yTop);
+        uv.push(arc, yBottom);
       }
       for (let i = 0; i < n; i++) {
         const a = 2 * i, b = a + 1;
@@ -307,6 +364,7 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
 
       const skirt = new THREE.BufferGeometry();
       skirt.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+      skirt.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
       skirt.setIndex(idx);
       skirt.computeVertexNormals();
 
@@ -322,12 +380,104 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
         deckThickness,
         yTop - deckThickness / 2,
         {
-          color, roughness, metalness: 0.0,
+          color, roughness, metalness: 0.0, wood: true,
           holes: [table_top_outline(tableW, tableH)],
           castShadow: true, receiveShadow: true,
         },
       );
       group.add(deck);
+
+      return group;
+}
+
+// The 18 rail sights ("diamonds") of a regulation table. They divide the playing
+// surface into an 8 x 4 grid: on each LONG rail three diamonds sit between the
+// corner pocket and the side pocket (the 4th grid line is the side pocket itself,
+// so no diamond there), and on each SHORT rail three sit at the quarter lines
+// (the middle one on the centreline). That is 3*4 (long) + 3*2 (short) = 18.
+//
+// Positions are referenced to the POCKET CENTRES along each rail, per the WPA
+// spec: the corner and side pockets are the grid's end points, and the diamonds
+// fall at the equal divisions between them — not at even fractions of the bare
+// nose-to-nose rectangle, which lands each sight a few mm short.
+//
+// Each diamond is inlaid in the wooden deck (the flat wood ring outside the
+// rails, whose top is flush with the rail at pocketWireY), centred across the
+// width of that wood band. A diamond is a small flat rhombus lying face-up with
+// its long axis pointing ACROSS the rail — toward the table — the way a
+// mother-of-pearl sight is set.
+export function makeTableSights(tableW, tableH, opts = {}) {
+      const {
+        color = 0xefe6cf,     // aged ivory / mother-of-pearl
+        halfLen = 0.013,      // point-to-point ACROSS the rail (~1 in tip to tip)
+        halfWid = 0.0075,     // point-to-point ALONG the rail
+        lift = 0.001,         // sit just proud of the wood so it can't z-fight
+      } = opts;
+
+      const p = pocket_positions(tableW, tableH);
+      const cornerX = Math.abs(p[0][0]);   // corner-pocket centre |x|  (long-rail ends)
+      const cornerZ = Math.abs(p[0][1]);   // corner-pocket centre |z|  (short-rail ends)
+
+      // Back from the nose onto the wood deck's flat. The deck's inner edge is the
+      // rail's outer edge (`inset` out from the nose); its outer edge is the
+      // cabinet's top section — cabinetRTop past the corner-pocket centres, which
+      // themselves sit (cornerX - tableW/2) out from the nose. Sit the sight a
+      // third of the way across, so it rides closer to the rail than the outer
+      // edge, the way a real inlaid diamond hugs the cushion.
+      const woodInner = inset;
+      const woodOuter = (cornerX - tableW / 2) + cabinetRTop;
+      const setback = woodInner + (woodOuter - woodInner) / 3;
+      const y = pocketWireY + lift;
+
+      // Long rails: x at the quarter divisions between a corner pocket (|x|=cornerX)
+      // and the side pocket (x=0); z pinned on the sight line, one rail each side.
+      const longX = [0.25, 0.5, 0.75].flatMap(f => [-cornerX * f, cornerX * f]);
+      // Short rails: z at the quarter divisions between the two corner pockets
+      // (z from -cornerZ to +cornerZ), i.e. -cornerZ/2, 0, +cornerZ/2.
+      const shortZ = [-cornerZ / 2, 0, cornerZ / 2];
+
+      // One flat rhombus authored with its LONG axis along local +X (halfLen),
+      // short axis along local +Y (halfWid); laid flat into the XZ plane below.
+      const shape = new THREE.Shape();
+      shape.moveTo(halfLen, 0);
+      shape.lineTo(0, halfWid);
+      shape.lineTo(-halfLen, 0);
+      shape.lineTo(0, -halfWid);
+      shape.closePath();
+      const geom = new THREE.ShapeGeometry(shape);
+      geom.rotateX(-Math.PI / 2);          // stand the shape up flat, long axis -> +X
+
+      const mat = new THREE.MeshStandardMaterial({
+        color, roughness: 0.35, metalness: 0.1,
+        emissive: 0x3a3320, emissiveIntensity: 0.25,   // a touch of glow so they read under the felt-level light
+      });
+
+      const group = new THREE.Group();
+      // The rhombus is authored long-axis-along-X; `longAxisZ` turns it 90° so the
+      // long axis runs along Z instead. Either way the long axis points ACROSS its
+      // rail, toward the table.
+      const add = (x, z, longAxisZ) => {
+        const d = new THREE.Mesh(geom, mat);
+        d.position.set(x, y, z);
+        if (longAxisZ) d.rotation.y = Math.PI / 2;
+        d.castShadow = false;
+        d.receiveShadow = true;
+        group.add(d);
+      };
+
+      // Top / bottom long rails run along X, so ACROSS is Z: long axis along Z. The
+      // nose is at z = tableH/2; the wood sits `setback` further OUT.
+      const longZ = tableH / 2 + setback;
+      for (const x of longX) {
+        add(x, -longZ, true);
+        add(x, +longZ, true);
+      }
+      // Left / right short rails run along Z, so ACROSS is X: long axis along X.
+      const shortX = tableW / 2 + setback;
+      for (const z of shortZ) {
+        add(-shortX, z, false);
+        add(+shortX, z, false);
+      }
 
       return group;
 }

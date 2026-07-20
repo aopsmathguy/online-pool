@@ -11,6 +11,7 @@ import { table_top_outline, point_in_outline } from '../shared/table.js';
 import {
   rail_pts, felt_pts, pocket_positions,
   makeTableRails, makePlanarMeshFromPolyline, makeCylindricalCupMesh, makeTableCabinet,
+  makeTableSights,
 } from './geometry.js';
 import {
   initCueStick, updateCueAndCamera, updateCueStick, placeCamera,
@@ -185,6 +186,7 @@ function buildScene() {
     rTop: cabinetRTop, rBottom: cabinetRBottom,
     yTop: cabinetYTop, yBottom: cabinetYBottom,
   }));
+  scene.add(makeTableSights(tableW, tableH));
   initCueStick();
 
   input = bindInput(canvas, {
