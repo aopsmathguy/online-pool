@@ -56,6 +56,13 @@ export function initScene() {
   scene.add(new THREE.AmbientLight(0xffffff, 0.3));
   for (const x of [-BULB_SPACING, 0, BULB_SPACING]) addBulb(x);
 
+  // Soft fill from the four cardinal directions (see addSideLight): reads as
+  // ambient from the sides, but grazes in low enough that each rail's overhang
+  // casts a shadow band onto the cloth — which is what makes the cushion line
+  // legible from the overhead view.
+  addSideLight(1, 0); addSideLight(-1, 0);
+  addSideLight(0, 1); addSideLight(0, -1);
+
   window.addEventListener('resize', fitCanvas);
   fitCanvas();
   return { scene, camera, renderer, canvas, DPR };
@@ -76,7 +83,7 @@ export function initScene() {
 const BULB_HEIGHT  = 1.40;   // above the cloth
 const BULB_SPACING = 0.80;   // between adjacent bulbs, down the long axis
 function addBulb(x) {
-  const bulb = new THREE.SpotLight(0xfff4e2, 3.0, 0, 0.80, 0.45, 2);
+  const bulb = new THREE.SpotLight(0xfff4e2, 2.3, 0, 0.80, 0.45, 2);
   //                               warm       int  dist  angle  penumbra  decay
   bulb.position.set(x, BULB_HEIGHT, 0);
 
@@ -116,6 +123,42 @@ function addBulb(x) {
   S.normalBias = 0;
 
   scene.add(bulb);
+}
+
+// One distant, low fill light out past a cushion, in cardinal direction (dx, dz)
+// (a unit step in X or Z). It sits SIDE_DIST metres out and SIDE_HEIGHT up, so it
+// grazes the table at a shallow ~30 deg — high enough not to shine under the rail,
+// low enough that the rail's overhanging lip drops a shadow band onto the cloth
+// just inside the cushion. Four of these (±X, ±Z) frame the whole playing area
+// with an even shadow that reads from bird's-eye.
+//
+// DirectionalLight, not Spot/Point: the rays are parallel, so the band is the
+// same width all the way down a rail rather than fanning out from a bulb; and a
+// single square ortho shadow map covers the table, unlike a point light's cube.
+const SIDE_DIST   = 7.0;    // metres out past the cushion ("5-10 m away")
+const SIDE_HEIGHT = 3.0;    // metres up -> elevation ~23 deg (grazes low; wide band)
+const SIDE_INT    = 0.35;   // soft: enough contrast for the band, not a wash-out
+function addSideLight(dx, dz) {
+  const L = new THREE.DirectionalLight(0xfff4e2, SIDE_INT);
+  L.position.set(dx * SIDE_DIST, SIDE_HEIGHT, dz * SIDE_DIST);
+  L.target.position.set(0, 0, 0);
+  scene.add(L.target);
+
+  L.castShadow = true;
+  const S = L.shadow;
+  S.mapSize.set(1024, 1024);
+  // Ortho frustum big enough to contain the whole table from this oblique angle;
+  // near/far bracket its depth along the light's ~8 m line of sight to the centre.
+  S.camera.left = -1.8; S.camera.right = 1.8;
+  S.camera.top  =  1.8; S.camera.bottom = -1.8;
+  S.camera.near = 3.0;
+  S.camera.far  = 14.0;
+  // A grazing light exaggerates depth acne on the near-flat cloth, so this needs
+  // a touch more depth bias than the near-overhead bulbs. normalBias stays 0 for
+  // the same contact-shadow reason spelled out in addBulb.
+  S.bias = -0.0004;
+  S.normalBias = 0;
+  scene.add(L);
 }
 
 // Swap the active camera: 'ortho' for the bird's-eye view, 'persp' otherwise.

@@ -10,13 +10,15 @@
 //   - Ball-in-hand: drag to position the cue ball, release to place it.
 import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
-         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop, pinchAim } from './cue.js';
+         getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop, pinchAim,
+         beginAimOrbit, dragAimOrbit, endAimOrbit, isAimOrbiting } from './cue.js';
 import { powerBarRect, spinDialRect } from './hudCanvas.js';
 
 const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
 const MOUSE_SENS_Y = 0.0020;     // radians per pixel of vertical drag (pitch)
 const POWER_PAD = 20;            // px slop around the power bar for grabbing the stick
 const SPIN_PAD = 8;              // px slop around the spin dial
+const GESTURE_SLOP = 12;         // px a two-finger gesture must move before it's ruled pinch vs drag
 
 export function bindInput(canvas, handlers) {
   const {
@@ -29,12 +31,14 @@ export function bindInput(canvas, handlers) {
     onZoom = () => {},
   } = handlers;
 
-  let drag = null;      // null | 'aim' | 'spin' | 'look' | 'power' | 'place' | 'pan'
+  let drag = null;      // null | 'aim' | 'spin' | 'look' | 'power' | 'place' | 'pan' | 'orbit'
   let dragId = null;    // pointerId of the active drag
   let lastX = 0, lastY = 0;
   let powerGrabY = 0, powerGrabVal = 0;   // power drag is RELATIVE to the grab point
   const pointers = new Map();   // active canvas pointers: id -> {x, y} (client px)
-  let pinch = null;             // { dist, midX, midY } (canvas px) while pinch-zooming overhead
+  let pinch = null;             // { dist, midX, midY } (canvas px) — previous frame of a two-finger gesture
+  let pinchStart = null;        // the { dist, midX, midY } the gesture opened at (for classification)
+  let pinchMode = null;         // null (undecided) | 'zoom' (pinch) | 'drag' (two-finger pan)
   let lastTime = performance.now();
 
   // Pinch state from the two active pointers, in canvas-local CSS pixels.
@@ -96,6 +100,20 @@ export function bindInput(canvas, handlers) {
   }, { passive: false });
 
   canvas.addEventListener('pointerdown', e => {
+    // Right mouse drag is the desktop twin of the two-finger drag: orbit-preview
+    // in aim, pan in overhead. (contextmenu is suppressed above so it isn't cut off.)
+    if (e.pointerType === 'mouse' && e.button === 2) {
+      const view = getViewMode();
+      let mode = null;
+      if (view === 'aim') { beginAimOrbit(); mode = 'orbit'; }
+      else if (view === 'top') mode = 'pan';
+      if (!mode) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      drag = mode; dragId = e.pointerId; lastX = e.clientX; lastY = e.clientY;
+      try { canvas.setPointerCapture(e.pointerId); } catch {}
+      e.preventDefault();
+      return;
+    }
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     // Two fingers → pinch to zoom: overhead zooms + pans about the midpoint, aim
@@ -106,6 +124,7 @@ export function bindInput(canvas, handlers) {
       drag = null; dragId = null;
       try { canvas.setPointerCapture(e.pointerId); } catch {}
       pinch = pinchInfo(canvas.getBoundingClientRect());
+      pinchStart = pinch; pinchMode = null;   // undecided until the fingers move enough to tell
       e.preventDefault();
       return;
     }
@@ -137,8 +156,31 @@ export function bindInput(canvas, handlers) {
     if (pinch && pointers.size >= 2) {
       const rect = canvas.getBoundingClientRect();
       const info = pinchInfo(rect);
-      if (getViewMode() === 'aim') pinchAim(info.dist, pinch.dist);
-      else pinchTop(info.midX, info.midY, pinch.midX, pinch.midY, info.dist, pinch.dist, rect.width, rect.height);
+      // Tell a PINCH (fingers change separation → zoom) from a two-finger DRAG
+      // (midpoint slides while separation holds → pan). Whichever axis moves more
+      // past the slop wins, then the gesture is locked to it so jitter in the
+      // other axis can't bleed in (a drag no longer creeps the zoom, and vice versa).
+      if (!pinchMode) {
+        const dDist = Math.abs(info.dist - pinchStart.dist);
+        const dMid  = Math.hypot(info.midX - pinchStart.midX, info.midY - pinchStart.midY);
+        if (Math.max(dDist, dMid) >= GESTURE_SLOP) {
+          pinchMode = dDist >= dMid ? 'zoom' : 'drag';
+          // Open the orbit fresh the moment a drag is recognised — even mid glide-
+          // back from a previous one — so a re-grab starts from the live view.
+          if (pinchMode === 'drag' && getViewMode() === 'aim') beginAimOrbit();
+        }
+      }
+      if (pinchMode === 'zoom') {
+        // Pinch: aim slides the camera along the stick; overhead zooms about the
+        // finger midpoint (prevMid == mid, so no pan contribution).
+        if (getViewMode() === 'aim') pinchAim(info.dist, pinch.dist);
+        else pinchTop(info.midX, info.midY, info.midX, info.midY, info.dist, pinch.dist, rect.width, rect.height);
+      } else if (pinchMode === 'drag') {
+        // Two-finger drag: overhead pans by the midpoint delta; aim orbits a fixed
+        // pivot out past the aim point (a shot-line preview that snaps back on lift).
+        if (getViewMode() === 'top') dragPanTop(info.midX - pinch.midX, info.midY - pinch.midY, rect.height);
+        else if (getViewMode() === 'aim') dragAimOrbit(info.midX - pinch.midX, info.midY - pinch.midY);
+      }
       pinch = info;
       return;
     }
@@ -150,6 +192,7 @@ export function bindInput(canvas, handlers) {
       if (drag === 'spin')  return setSpinFrom(p);
       if (drag === 'place') return onPlaceMove(e.clientX, e.clientY);
       if (drag === 'aim')   { addYaw(dx * MOUSE_SENS_X); addPitch(-dy * MOUSE_SENS_Y); return; }
+      if (drag === 'orbit') { dragAimOrbit(dx, dy); return; }
       if (drag === 'look')  { freeLookMouse(dx, dy); return; }
       if (drag === 'pan')   { dragPanTop(dx, dy, canvas.getBoundingClientRect().height); return; }
       return;
@@ -160,6 +203,7 @@ export function bindInput(canvas, handlers) {
     if (e && e.pointerId !== dragId) return;
     const mode = drag;
     drag = null; dragId = null;
+    if (mode === 'orbit') { endAimOrbit(); return; }   // snap back to the sighting view
     if (mode === 'power') {
       const pull = getPullback();
       // Deliberately NOT reset here. The shot is away but the recording has to
@@ -176,7 +220,11 @@ export function bindInput(canvas, handlers) {
     pointers.delete(e.pointerId);
     if (pinch) {
       if (pointers.size < 2) {
-        pinch = null;
+        const wasOrbiting = isAimOrbiting();
+        pinch = null; pinchStart = null; pinchMode = null;
+        // An orbit preview ends the moment a finger lifts: snap back to the
+        // sighting view rather than handing the leftover finger a real aim drag.
+        if (wasOrbiting) { endAimOrbit(); return; }
         // One finger still down → hand off to that view's drag, starting from
         // where the finger actually is so the camera doesn't jump.
         if (pointers.size === 1) {
@@ -242,7 +290,7 @@ export function bindInput(canvas, handlers) {
     stopZoom();
     if (drag === 'power') setPullback(0);
     drag = null; dragId = null;
-    pointers.clear(); pinch = null;
+    pointers.clear(); pinch = null; pinchStart = null; pinchMode = null;
   });
 
   function tick() {

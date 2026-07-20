@@ -84,6 +84,52 @@ export function pinchAim(dist, prevDist) {
   camDist = d; camDistTarget = d;
 }
 
+export function isAimOrbiting() { return aimOrbit !== null; }
+
+// Begin an orbit preview from the CURRENT sighting view. The camera is some
+// distance behind the look point; the pivot is that same distance PAST it (so
+// the look point is the midpoint), and we remember where the eye sits around the
+// pivot in spherical terms. Because the eye already looks straight at the pivot
+// (it is collinear, just beyond the look point), the view opens seamlessly.
+export function beginAimOrbit() {
+  if (viewMode !== 'aim' || !cameraAnchor.set) return;
+  const cx = camera.position.x, cy = camera.position.y, cz = camera.position.z;
+  let fx = _lastLook.x - cx, fy = _lastLook.y - cy, fz = _lastLook.z - cz;
+  const eyeToLook = Math.hypot(fx, fy, fz);
+  if (eyeToLook < 1e-4) return;
+  fx /= eyeToLook; fy /= eyeToLook; fz /= eyeToLook;
+  // Pivot = look point pushed forward so the eye→pivot radius is ORBIT_RADIUS_SCALE
+  // times the eye→look distance (push = (scale − 1)·eyeToLook past the look point).
+  const past = (ORBIT_RADIUS_SCALE - 1) * eyeToLook;
+  const px = _lastLook.x + fx * past;
+  const py = _lastLook.y + fy * past;
+  const pz = _lastLook.z + fz * past;
+  const ox = cx - px, oy = cy - py, oz = cz - pz;   // pivot → eye
+  const radius = Math.hypot(ox, oy, oz);
+  aimOrbit = {
+    px, py, pz, radius,
+    azimuth: Math.atan2(oz, ox),
+    elevation: Math.asin(clamp(oy / radius, -1, 1)),
+    returning: false,
+    // Live pose, tracked each frame so a release can glide back from right here.
+    curEye: new THREE.Vector3(cx, cy, cz),
+    curLook: new THREE.Vector3(px, py, pz),
+    curUp: new THREE.Vector3(0, 1, 0),
+  };
+}
+
+// Swing the orbit by a drag delta (pixels). Right/down drag moves the eye
+// right/down around the pivot, matching the aim view's drag feel.
+export function dragAimOrbit(dxPx, dyPx) {
+  if (!aimOrbit) return;
+  aimOrbit.azimuth += dxPx * ORBIT_SENS_X;
+  aimOrbit.elevation = clamp(aimOrbit.elevation - dyPx * ORBIT_SENS_Y, -ORBIT_ELEV_LIMIT, ORBIT_ELEV_LIMIT);
+}
+
+// End the preview. Rather than snapping, mark it `returning` so placeCamera eases
+// the pose back to the sighting view over the next few frames, then clears it.
+export function endAimOrbit() { if (aimOrbit) aimOrbit.returning = true; }
+
 // Overhead view: pan by dragging (the world point under the cursor stays under
 // it, so dragging down moves the table down on screen). dxPx/dyPx are pixel
 // deltas since the last move; viewHpx is the canvas height in CSS pixels.
@@ -119,6 +165,7 @@ export function pinchTop(midX, midY, prevMidX, prevMidY, dist, prevDist, viewW, 
 // The overhead view renders through the orthographic camera (true plan view);
 // everything else uses the perspective one. scene.js swaps the active camera.
 export function setViewMode(v) {
+  if (v !== viewMode) aimOrbit = null;   // a preview never survives a view switch
   viewMode = v;
   setCameraMode(v === 'top' ? 'ortho' : 'persp');
 }
@@ -164,6 +211,23 @@ let stickMesh = null;
 // camera keeps orbiting the spot the cue was at when the shot was taken,
 // instead of teleporting around mid-shot.
 const cameraAnchor = { x: 0, y: 0, z: 0, set: false };
+
+// Aim-view ORBIT PREVIEW. While a two-finger drag / right-drag is held, the
+// camera swings around a fixed pivot out past the aim point (see beginAimOrbit),
+// keeping that pivot centred — a parallax preview of the shot line. It never
+// touches the aim (yaw/pitch/dolly). Releasing flips `returning` on and the pose
+// eases back to the sighting view over a few frames, rather than snapping.
+// null when inactive; else { px,py,pz (pivot), radius, azimuth, elevation,
+// returning, curEye, curLook, curUp }.
+let aimOrbit = null;
+const _lastLook = new THREE.Vector3();   // the aim camera's live look target (fed by placeCamera)
+const _aimEye = new THREE.Vector3();     // the aim camera's live eye position (fed by placeCamera)
+const _aimUp = new THREE.Vector3();      // the aim camera's live up vector (fed by placeCamera)
+const ORBIT_SENS_X = 0.006, ORBIT_SENS_Y = 0.006;   // radians per pixel of drag
+const ORBIT_ELEV_LIMIT = 1.45;           // clamp shy of straight over/under the pivot
+const ORBIT_RADIUS_SCALE = 1.5;          // orbit radius as a multiple of the eye→look distance
+const ORBIT_RETURN_EASE = 0.07;          // per-frame lerp of the release glide back to the sighting view
+const ORBIT_RETURN_EPS2 = 1e-5;          // finish the glide once the eye is within ~3mm² of the aim pose
 
 // State
 const state = {
@@ -407,7 +471,10 @@ export function placeCamera() {
   const sideOff = state.strikeX * R * 0.7;
   const rx = -aim.z, rz = aim.x;
 
-  camera.position.set(
+  // Compute the sighting pose into _aimEye / _aimUp / _lastLook rather than
+  // applying it straight to the camera: an active orbit preview overrides it, and
+  // a releasing one eases back to it (both need it as data, not a live transform).
+  _aimEye.set(
     ax - dx * camDist + rx * sideOff + upx * overStick,
     ay - dy * camDist                + upy * overStick,
     az - dz * camDist + rz * sideOff + upz * overStick,
@@ -415,10 +482,47 @@ export function placeCamera() {
   // Roll reference = the stick's own up vector: always perpendicular to the
   // sightline, so the view stays stable even at near-vertical pitch (where
   // world-up would be almost parallel to the look direction).
-  camera.up.set(upx, upy, upz);
-  camera.lookAt(
+  _aimUp.set(upx, upy, upz);
+  // The look target — also the pivot anchor an orbit preview opens around.
+  _lastLook.set(
     ax + dx * CAM_LOOK_AHEAD + rx * sideOff + upx * overStick,
     ay + dy * CAM_LOOK_AHEAD                + upy * overStick,
     az + dz * CAM_LOOK_AHEAD + rz * sideOff + upz * overStick,
   );
+
+  // Orbit preview overrides the sighting pose while a two-finger / right drag is
+  // held; on release it eases back to it (returning) before handing control back.
+  if (aimOrbit) {
+    if (aimOrbit.returning) {
+      // Glide the held pose toward the live sighting pose; finish when close.
+      aimOrbit.curEye.lerp(_aimEye, ORBIT_RETURN_EASE);
+      aimOrbit.curLook.lerp(_lastLook, ORBIT_RETURN_EASE);
+      aimOrbit.curUp.lerp(_aimUp, ORBIT_RETURN_EASE).normalize();
+      if (aimOrbit.curEye.distanceToSquared(_aimEye) < ORBIT_RETURN_EPS2) {
+        aimOrbit = null;   // arrived — fall through to the live sighting view
+      } else {
+        camera.position.copy(aimOrbit.curEye);
+        camera.up.copy(aimOrbit.curUp);
+        camera.lookAt(aimOrbit.curLook);
+        return;
+      }
+    } else {
+      // Live orbit: swing around the fixed pivot, keeping it centred, and record
+      // the pose so a release glides back from exactly here.
+      const ce = Math.cos(aimOrbit.elevation), se = Math.sin(aimOrbit.elevation);
+      const ca = Math.cos(aimOrbit.azimuth),  sa = Math.sin(aimOrbit.azimuth);
+      const r = aimOrbit.radius;
+      aimOrbit.curEye.set(aimOrbit.px + r * ce * ca, aimOrbit.py + r * se, aimOrbit.pz + r * ce * sa);
+      aimOrbit.curLook.set(aimOrbit.px, aimOrbit.py, aimOrbit.pz);
+      aimOrbit.curUp.set(0, 1, 0);
+      camera.position.copy(aimOrbit.curEye);
+      camera.up.copy(aimOrbit.curUp);
+      camera.lookAt(aimOrbit.curLook);
+      return;
+    }
+  }
+
+  camera.position.copy(_aimEye);
+  camera.up.copy(_aimUp);
+  camera.lookAt(_lastLook.x, _lastLook.y, _lastLook.z);
 }
