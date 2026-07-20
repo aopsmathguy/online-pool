@@ -85,6 +85,16 @@ function easeOpponentView() {
   opponentView.pullback += (opponentAim.pullback - opponentView.pullback) * AIM_SMOOTH;
 }
 const localPlace = { x: -tableW / 4, z: 0 };
+// Ball-in-hand placement is streamed, exactly like the opponent's aim, so the
+// authoritative position STEPS: mine round-trips through the server (which
+// clamps it into the legal region) and the opponent's arrives at packet rate.
+// Writing it straight to the mesh made the ball jitter under my own cursor and
+// hop across the felt while they dragged. placeTarget is the server's spot;
+// placeView is what is drawn, eased toward it every frame.
+const placeTarget = { x: 0, z: 0 };
+const placeView = { x: 0, z: 0 };
+let placeActive = false;                 // a ball-in-hand is currently being eased
+const PLACE_SMOOTH = 0.35;               // per-frame ease toward the target
 let sceneReady = false;
 let stageCanvas = null;
 
@@ -319,6 +329,10 @@ socket.on('startGame', ({ game, layout }) => {
   setReviewLayout(layout);   // fix id→number for this rack
   timeline.reset();          // a new rack: drop the previous one's shots
   buildRack(layout);
+  // Drop any placement in flight from the previous rack. `gs` still says
+  // PH_PLACING until the new game's first gameState lands, so leaving this on
+  // would ease the freshly racked cue ball toward the old game's spot.
+  placeActive = false;
   if (net.resuming) {
     // Resuming into the SAME rack: keep the watched-shot counter. Zeroing it
     // here would make the next drop re-request shots we already sat through.
@@ -379,7 +393,35 @@ function applyPlacing(p) {
   gs.interact = PH_PLACING;
   gs.current = p.player;
   if (p.player === net.myIndex) { localPlace.x = p.x; localPlace.z = p.z; }
-  setCuePosition(p.x, p.z);
+  placeTarget.x = p.x; placeTarget.z = p.z;
+  // The FIRST placing packet of a ball-in-hand snaps: the ball has just been
+  // scratched and belongs wherever the server put it, so easing there would
+  // slide it across the table from wherever the shot left it.
+  if (!placeActive) { placeView.x = p.x; placeView.z = p.z; placeActive = true; }
+  // Re-assert the eased position, not the target. renderLive() calls syncRack
+  // just before this and the stored ball set has the cue patched to `placing`
+  // (see timeline.adoptLive), so the mesh has already been snapped there —
+  // without this the easing below would be overwritten on every packet.
+  setCuePosition(placeView.x, placeView.z);
+}
+
+// Glide the cue ball toward the server's placement each frame. Runs from the
+// render loop, so it smooths at display rate rather than at packet rate.
+function easePlacement() {
+  if (!placeActive) return;
+  // A replay owns the meshes while it is on screen; leave them alone.
+  if (!isLive()) { placeActive = false; return; }
+  if (gs.interact !== PH_PLACING) {
+    // Placement is over (confirmed, or the turn moved on). Land exactly on the
+    // server's spot so a fast drag followed by an immediate ✓ doesn't leave the
+    // ball a few millimetres short of where it was actually placed.
+    placeActive = false;
+    setCuePosition(placeTarget.x, placeTarget.z);
+    return;
+  }
+  placeView.x += (placeTarget.x - placeView.x) * PLACE_SMOOTH;
+  placeView.z += (placeTarget.z - placeView.z) * PLACE_SMOOTH;
+  setCuePosition(placeView.x, placeView.z);
 }
 
 // THE INVARIANT, and the guard that keeps it honest.
@@ -591,6 +633,7 @@ function loop(now) {
   requestAnimationFrame(loop);
   if (!sceneReady) return;
   if (input) input.tick();
+  easePlacement();       // glide the cue ball toward the streamed ball-in-hand spot
   updatePlaceButton();   // ✓ button follows the cue ball during ball-in-hand
 
   timeline.tick(now);    // advance the playhead if a shot is on screen

@@ -18,7 +18,7 @@ const VISUAL_PULLBACK_SCALE = 0.35; // visual stick draw is this fraction of pul
 // above the table; pitch=0 is horizontal, pitch=π/2 is straight down.
 const CAM_DIST       = 0.8;     // distance from cue ball to camera
 const CAM_LOOK_AHEAD = 0.25;     // shift the look target past the ball along aim
-const CAM_RAISE      = 0.1;     // extra vertical lift so the cue stick passes below the camera
+const CAM_RAISE      = 0.12;     // extra vertical lift so the cue stick passes below the camera
 const PITCH_MIN = 0.0;          // ~6°  (almost horizontal)
 const PITCH_MAX = 1.50;          // ~75° (steep top-down)
 

@@ -201,6 +201,12 @@ describe('replay + resume', { skip }, () => {
     // table for a while.
     const cuePos = `(() => { const c = window.__cuePos(); return c ? {x:+c.x.toFixed(4), z:+c.z.toFixed(4)} : null; })()`;
     await b.freshGame();   // don't inherit a finished game from an earlier test
+    // freshGame() lands in ball-in-hand for the opening break. Confirm it here:
+    // the loop below waits for AIMING, and its own placeConfirm is INSIDE the
+    // loop, after that wait — so without this the first iteration waits for a
+    // phase only it could have caused, and the test times out having never run
+    // a single comparison.
+    await b.evaluate(`window.__net.socket.emit('placeConfirm', {})`);
 
     for (let n = 0; n < 3; n++) {
       // Settle in AIMING specifically. Ball-in-hand legitimately moves the cue
