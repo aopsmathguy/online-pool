@@ -111,10 +111,12 @@ export function beginAimOrbit() {
     azimuth: Math.atan2(oz, ox),
     elevation: Math.asin(clamp(oy / radius, -1, 1)),
     returning: false,
-    // Live pose, tracked each frame so a release can glide back from right here.
-    curEye: new THREE.Vector3(cx, cy, cz),
-    curLook: new THREE.Vector3(px, py, pz),
-    curUp: new THREE.Vector3(0, 1, 0),
+    // Offset of the orbit pose FROM the live sighting pose, refreshed each live
+    // frame. On release it decays toward zero on top of the (possibly moving)
+    // sighting pose, so the gap always shrinks regardless of how the aim moves.
+    offEye: new THREE.Vector3(),
+    offLook: new THREE.Vector3(),
+    offUp: new THREE.Vector3(),
   };
 }
 
@@ -494,30 +496,33 @@ export function placeCamera() {
   // held; on release it eases back to it (returning) before handing control back.
   if (aimOrbit) {
     if (aimOrbit.returning) {
-      // Glide the held pose toward the live sighting pose; finish when close.
-      aimOrbit.curEye.lerp(_aimEye, ORBIT_RETURN_EASE);
-      aimOrbit.curLook.lerp(_lastLook, ORBIT_RETURN_EASE);
-      aimOrbit.curUp.lerp(_aimUp, ORBIT_RETURN_EASE).normalize();
-      if (aimOrbit.curEye.distanceToSquared(_aimEye) < ORBIT_RETURN_EPS2) {
+      // Decay the offset toward zero and lay it over the LIVE sighting pose, so
+      // the gap always shrinks — even while the player is moving their aim — and
+      // locks on the instant it reaches zero (never chasing a moving target).
+      aimOrbit.offEye.multiplyScalar(1 - ORBIT_RETURN_EASE);
+      aimOrbit.offLook.multiplyScalar(1 - ORBIT_RETURN_EASE);
+      aimOrbit.offUp.multiplyScalar(1 - ORBIT_RETURN_EASE);
+      if (aimOrbit.offEye.lengthSq() < ORBIT_RETURN_EPS2) {
         aimOrbit = null;   // arrived — fall through to the live sighting view
       } else {
-        camera.position.copy(aimOrbit.curEye);
-        camera.up.copy(aimOrbit.curUp);
-        camera.lookAt(aimOrbit.curLook);
+        camera.position.set(_aimEye.x + aimOrbit.offEye.x, _aimEye.y + aimOrbit.offEye.y, _aimEye.z + aimOrbit.offEye.z);
+        camera.up.set(_aimUp.x + aimOrbit.offUp.x, _aimUp.y + aimOrbit.offUp.y, _aimUp.z + aimOrbit.offUp.z).normalize();
+        camera.lookAt(_lastLook.x + aimOrbit.offLook.x, _lastLook.y + aimOrbit.offLook.y, _lastLook.z + aimOrbit.offLook.z);
         return;
       }
     } else {
-      // Live orbit: swing around the fixed pivot, keeping it centred, and record
-      // the pose so a release glides back from exactly here.
+      // Live orbit: swing around the fixed pivot, keeping it centred. Record the
+      // pose's offset from the sighting pose so a release decays from exactly here.
       const ce = Math.cos(aimOrbit.elevation), se = Math.sin(aimOrbit.elevation);
       const ca = Math.cos(aimOrbit.azimuth),  sa = Math.sin(aimOrbit.azimuth);
       const r = aimOrbit.radius;
-      aimOrbit.curEye.set(aimOrbit.px + r * ce * ca, aimOrbit.py + r * se, aimOrbit.pz + r * ce * sa);
-      aimOrbit.curLook.set(aimOrbit.px, aimOrbit.py, aimOrbit.pz);
-      aimOrbit.curUp.set(0, 1, 0);
-      camera.position.copy(aimOrbit.curEye);
-      camera.up.copy(aimOrbit.curUp);
-      camera.lookAt(aimOrbit.curLook);
+      const ex = aimOrbit.px + r * ce * ca, ey = aimOrbit.py + r * se, ez = aimOrbit.pz + r * ce * sa;
+      aimOrbit.offEye.set(ex - _aimEye.x, ey - _aimEye.y, ez - _aimEye.z);
+      aimOrbit.offLook.set(aimOrbit.px - _lastLook.x, aimOrbit.py - _lastLook.y, aimOrbit.pz - _lastLook.z);
+      aimOrbit.offUp.set(0 - _aimUp.x, 1 - _aimUp.y, 0 - _aimUp.z);
+      camera.position.set(ex, ey, ez);
+      camera.up.set(0, 1, 0);
+      camera.lookAt(aimOrbit.px, aimOrbit.py, aimOrbit.pz);
       return;
     }
   }
