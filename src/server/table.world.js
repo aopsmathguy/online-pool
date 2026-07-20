@@ -8,12 +8,12 @@
 //
 // The only thing the caller needs back is `railPtr`: the contact scanner
 // identifies rail hits by body pointer (see scanContacts in sim.js).
-import { tableW, tableH, wireY, rodR, mu_wall, mu_ground, mu_pocket, e_rail, e_table, e_pocket } from '../shared/constants.js';
+import { tableW, tableH, wireY, rodR, mu_wall, mu_ground, mu_pocket, e_rail, e_table, e_pocket, cupDepth, cupY } from '../shared/constants.js';
 import {
   createWorld, createRigidBody, setBodyFilter, AmmoLib,
   CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, CG_SUNK, CG_FELTMESH,
 } from './physics.js';
-import { createPhysicsPolyline, createCylindricalCup, createFeltMesh } from './geometry.physics.js';
+import { createTableBoundary, createCylindricalCup, createFeltMesh } from './geometry.physics.js';
 import { rail_pts, felt_pts } from '../shared/table.js';
 import { pocketPositions } from '../shared/pockets.js';
 
@@ -42,8 +42,9 @@ export function buildTableWorld() {
   feltMesh.setUserIndex(3);
   setBodyFilter(world, feltMesh, CG_FELTMESH, CG_BALL);
 
-  // Rails.
-  const railBody = createPhysicsPolyline(world, railPoints, rodR, wireY, {
+  // Rails (solid cushions) + pocket throats (wire), one body — see
+  // createTableBoundary for why they must not be split.
+  const railBody = createTableBoundary(world, tableW, tableH, rodR, wireY, {
     mu: mu_wall, e: e_rail, margin: 0.0002,
   });
   railBody.setUserIndex(2);
@@ -51,8 +52,8 @@ export function buildTableWorld() {
 
   // Pocket cups.
   for (const [x, z] of pocketPositions) {
-    const cup = createCylindricalCup(world, 0.08, 0.4, {
-      mu: mu_pocket, e: e_pocket, pos: { x, y: -0.21, z },
+    const cup = createCylindricalCup(world, 0.08, cupDepth, {
+      mu: mu_pocket, e: e_pocket, pos: { x, y: cupY, z },
     });
     cup.setUserIndex(4);
     setBodyFilter(world, cup, CG_POCKET, CG_BALL | CG_SUNK);   // holds live + pocketed balls

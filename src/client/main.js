@@ -3,10 +3,14 @@
 // simulation runs on the server (see server/index.js + src/sim.js).
 import * as THREE from "/lib/three.module.js";
 import { initScene, render, camera } from './scene.js';
-import { tableW, tableH, wireY, rodR, R } from '../shared/constants.js';
+import {
+  tableW, tableH, wireY, rodR, R, cupDepth, cupY, cupR,
+  cabinetRTop, cabinetRBottom, cabinetYTop, cabinetYBottom, cabinetDeckUnderY,
+} from '../shared/constants.js';
+import { table_top_outline, point_in_outline } from '../shared/table.js';
 import {
   rail_pts, felt_pts, pocket_positions,
-  makePolylineMesh, makePlanarMeshFromPolyline, makeCylindricalCupMesh,
+  makeTableRails, makePlanarMeshFromPolyline, makeCylindricalCupMesh, makeTableCabinet,
 } from './geometry.js';
 import {
   initCueStick, updateCueAndCamera, updateCueStick, placeCamera,
@@ -146,16 +150,41 @@ function buildScene() {
   initHud(document.getElementById('hudCanvas'));   // 2D overlay HUD (spin/power/view/pocketed)
   initReview(timeline);   // shot list + transport bar, driving the playhead
 
-  const railPoints = rail_pts(tableW, tableH);
   const feltPoints = felt_pts(tableW, tableH);
   const pocketPositions = pocket_positions(tableW, tableH);
   // Table slab, 1 inch (0.0254 m) thick; top stays at the felt level (y=0), so
   // pass y = -thickness/2. (Purely visual — the physics felt is a plane at y=0.)
   scene.add(makePlanarMeshFromPolyline(feltPoints, 0.0254, -0.0127, { felt: true }));
-  scene.add(makePolylineMesh(railPoints, rodR, wireY, { color: 0xb8c2cc }));
+  // Wire and cups are one black plastic assembly — the throat runs straight into
+  // the pocket it lines, so they share a finish as well as a colour.
+  //
+  // Plastic is a DIELECTRIC, which is the whole reason this is a Standard
+  // material and not the Phong one these used to carry. At metalness 0 the
+  // renderer gives the surface a ~4% reflection on its own, independent of how
+  // dark the base colour is, so black plastic keeps a believable sheen instead
+  // of going flat. Phong had no such split — its highlight was a colour you set
+  // by hand, which is why a specular strong enough to shape the wire also turned
+  // the cup floor into a grey plate, and why turning it off flattened both.
+  const POCKET_BLACK = 0x141414;   // near-black; true 0 leaves nothing for light to land on
+  const PLASTIC = { roughness: 0.35, metalness: 0.0 };
+  scene.add(makeTableRails(tableW, tableH, rodR, wireY, { color: POCKET_BLACK, ...PLASTIC }));
+  // Each cup carries its wall up to the deck's underside over the part of its rim
+  // that lies outside the table, so there is no see-through gap under the wire.
+  const topOutline = table_top_outline(tableW, tableH);
   for (const [x, z] of pocketPositions) {
-    scene.add(makeCylindricalCupMesh(0.075, 0.4, { pos: { x, y: -0.21, z } }));
+    scene.add(makeCylindricalCupMesh(cupR, cupDepth, {
+      pos: { x, y: cupY, z },
+      color: POCKET_BLACK, ...PLASTIC,
+      raiseTo: cabinetDeckUnderY,
+      raiseWhere: (px, pz) => !point_in_outline(px, pz, topOutline),
+    }));
   }
+  // Cabinet last: it wraps everything above and its deck must draw over the
+  // slab's outer edge, not under it.
+  scene.add(makeTableCabinet(tableW, tableH, {
+    rTop: cabinetRTop, rBottom: cabinetRBottom,
+    yTop: cabinetYTop, yBottom: cabinetYBottom,
+  }));
   initCueStick();
 
   input = bindInput(canvas, {

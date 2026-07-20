@@ -2,9 +2,10 @@
 // Ammo only, no Three. Each builder takes the target `world` so a room can
 // build its own table. Ported verbatim from the physics halves of the old
 // geometry.js (the mesh halves stay in geometry.js for the client).
-import { mu_wall, e_rail, mu_ground, e_table } from '../shared/constants.js';
+import { mu_wall, e_rail, mu_ground, e_table, pocketWireY } from '../shared/constants.js';
 import { AmmoLib, createRigidBody } from './physics.js';
 import { triangulate } from '../shared/triangulate.js';
+import { table_parts, rail_solid } from '../shared/table.js';
 
 // Static triangulated felt at height `y`, built from the displayed felt outline
 // `feltPts` ([[x,z],...]) so the pocket cutouts are REAL holes: a ball on this
@@ -33,40 +34,26 @@ export function createFeltMesh(world, feltPts, y = 0, opts = {}) {
   });
 }
 
-export function createPhysicsPolyline(world, pointsXZ, wireR, wireY, opts = {}) {
-  const Ammo = AmmoLib;
-  const mu = opts.mu ?? mu_wall;     // tangential friction vs balls
-  const e  = opts.e  ?? e_rail;      // restitution vs balls
-  const margin = opts.margin ?? 0.001;
-
-  const compound = new Ammo.btCompoundShape();
-
-  function makeCapsule(height) {
-    const shape = new Ammo.btCapsuleShape(wireR, Math.max(0, height));
-    shape.setMargin(margin);
-    return shape;
+// quaternion to rotate (0,1,0) -> dir (unit)
+function quatFromUpToDir(Ammo, dir) {
+  const ux=0, uy=1, uz=0;
+  const dx=dir[0], dy=dir[1], dz=dir[2];
+  const dot = uy*dy;
+  const cx = uy*dz - uz*dy;
+  const cy = uz*dx - ux*dz;
+  const cz = ux*dy - uy*dx;
+  if (dot < -0.999999) {
+    return new Ammo.btQuaternion(1,0,0,0);
+  } else {
+    const s = Math.sqrt((1 + dot) * 2);
+    const invs = 1 / s;
+    return new Ammo.btQuaternion(cx * invs, cy * invs, cz * invs, s * 0.5);
   }
+}
 
+// Capsules along a polyline at height `wireY`, added to an existing compound.
+function addPolylineCapsules(Ammo, compound, pointsXZ, wireR, wireY, margin) {
   const tmpTr = new Ammo.btTransform();
-  tmpTr.setIdentity();
-
-  // quaternion to rotate (0,1,0) -> dir (unit)
-  function quatFromUpToDir(dir) {
-    const ux=0, uy=1, uz=0;
-    const dx=dir[0], dy=dir[1], dz=dir[2];
-    const dot = uy*dy;
-    const cx = uy*dz - uz*dy;
-    const cy = uz*dx - ux*dz;
-    const cz = ux*dy - uy*dx;
-    if (dot < -0.999999) {
-      return new Ammo.btQuaternion(1,0,0,0);
-    } else {
-      const s = Math.sqrt((1 + dot) * 2);
-      const invs = 1 / s;
-      return new Ammo.btQuaternion(cx * invs, cy * invs, cz * invs, s * 0.5);
-    }
-  }
-
   for (let i = 0; i + 1 < pointsXZ.length; i++) {
     const [x1,z1] = pointsXZ[i];
     const [x2,z2] = pointsXZ[i+1];
@@ -74,19 +61,52 @@ export function createPhysicsPolyline(world, pointsXZ, wireR, wireY, opts = {}) 
     const len = Math.hypot(dx, dz);
     if (len < 1e-6) continue;
 
-    const height = Math.max(len - 2 * wireR, 0);
-    const cap = makeCapsule(height);
-
-    const mx = (x1 + x2) * 0.5;
-    const mz = (z1 + z2) * 0.5;
-
-    const dir = [dx/len, 0, dz/len];
-    const q = quatFromUpToDir(dir);
+    const cap = new Ammo.btCapsuleShape(wireR, Math.max(0, len - 2 * wireR));
+    cap.setMargin(margin);
 
     tmpTr.setIdentity();
-    tmpTr.setOrigin(new Ammo.btVector3(mx, wireY, mz));
-    tmpTr.setRotation(q);
+    tmpTr.setOrigin(new Ammo.btVector3((x1 + x2) * 0.5, wireY, (z1 + z2) * 0.5));
+    tmpTr.setRotation(quatFromUpToDir(Ammo, [dx/len, 0, dz/len]));
     compound.addChildShape(tmpTr, cap);
+  }
+}
+
+// The whole table boundary as ONE static body: six solid trapezoidal rails
+// (convex hulls, from the shared rail_solid) and six wire pocket throats
+// (capsules). They share a body deliberately — the contact scanner in sim.js
+// recognises a rail hit by a single body pointer, so splitting these into
+// twelve bodies would make every cushion contact read as "not a rail".
+//
+// A ball centre sits at y=R, below the rails' y=wireY top edge, so contact
+// lands on that 45 deg nose edge — the same line the old wire ran along.
+export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = {}) {
+  const Ammo = AmmoLib;
+  const mu = opts.mu ?? mu_wall;     // tangential friction vs balls
+  const e  = opts.e  ?? e_rail;      // restitution vs balls
+  const margin = opts.margin ?? 0.001;
+
+  const { wires, rails } = table_parts(tableW, tableH);
+  const compound = new Ammo.btCompoundShape();
+  const tmpTr = new Ammo.btTransform();
+  tmpTr.setIdentity();
+
+  for (const rail of rails) {
+    const hull = new Ammo.btConvexHullShape();
+    const v = new Ammo.btVector3();
+    for (const [x, y, z] of rail_solid(rail, wireY)) {
+      v.setValue(x, y, z);
+      hull.addPoint(v, true);
+    }
+    Ammo.destroy(v);
+    hull.setMargin(margin);
+    tmpTr.setIdentity();
+    compound.addChildShape(tmpTr, hull);
+  }
+
+  // Wire only where the rails don't already reach — see table_parts. It rides
+  // at pocketWireY, level with the rails' raised outer-top corners it joins.
+  for (const wire of wires) {
+    addPolylineCapsules(Ammo, compound, wire, wireR, pocketWireY, margin);
   }
 
   return createRigidBody(world, {
