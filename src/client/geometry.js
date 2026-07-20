@@ -158,11 +158,11 @@ export function makeTableRails(tableW, tableH, wireR, wireY, opts = {}) {
 // without a join and mipmap correctly.
 //
 // UVs on the felt come from ExtrudeGeometry's world-space UV generator, i.e. they
-// are in METRES, so `repeat` is exactly "tiles per metre". Sizing the tile in
-// inches keeps it tied to the scan's real-world footprint rather than to a magic
-// number: one tile spans 25", ~1.57 tiles per metre, ~3.5 across a 2.24 m table.
-const FELT_TILE_INCHES = 25;
-const FELT_REPEAT = 1 / (FELT_TILE_INCHES * 0.0254);
+// are in METRES, so `repeat` is exactly "tiles per metre". The scan's real-world
+// footprint is 50 cm square, so one tile spans 0.5 m, 2 tiles per metre, ~4.5
+// across a 2.24 m table.
+const FELT_TILE_METRES = 0.5;
+const FELT_REPEAT = 1 / FELT_TILE_METRES;
 const FELT_MAPS = {
       map:          '/assets/felt/color.jpg',
       normalMap:    '/assets/felt/normal.png',
