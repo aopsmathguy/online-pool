@@ -227,7 +227,7 @@ const _aimEye = new THREE.Vector3();     // the aim camera's live eye position (
 const _aimUp = new THREE.Vector3();      // the aim camera's live up vector (fed by placeCamera)
 const ORBIT_SENS_X = 0.006, ORBIT_SENS_Y = 0.006;   // radians per pixel of drag
 const ORBIT_ELEV_LIMIT = 1.45;           // clamp shy of straight over/under the pivot
-const ORBIT_RADIUS_SCALE = 1.5;          // orbit radius as a multiple of the eye→look distance
+const ORBIT_RADIUS_SCALE = 1.3;          // orbit radius as a multiple of the eye→look distance
 const ORBIT_RETURN_EASE = 0.07;          // per-frame lerp of the release glide back to the sighting view
 const ORBIT_RETURN_EPS2 = 1e-5;          // finish the glide once the eye is within ~3mm² of the aim pose
 

@@ -51,10 +51,9 @@ import { POCKET_MOUTHS as POCKETS } from '../shared/pockets.js';
 
 // --- Tunables -----------------------------------------------------------------
 // Aim error (the only thing the difficulty slider controls): triangular ± this
-// many radians, interpolated exponentially between the easiest and hardest
-// settings so every notch of the slider is felt.
+// many radians, falling off as the square of the remaining difficulty so the
+// error shrinks fastest near the top of the slider and hits exactly 0 there.
 const JITTER_EASIEST_RAD = 0.07;   // difficulty 0: ~4° — misses most pots
-const JITTER_HARDEST_RAD = 0.002;  // difficulty 1: ~0.11° — nearly perfect
 const BREAK_JITTER_SCALE = 1.7;    // the break is always a bit sloppier
 const MAX_POWER = 0.825;        // client's PULLBACK_MAX (see cue.js)
 const MIN_POWER = 0.16;        // never just dribble a ball in
@@ -78,9 +77,12 @@ function jitter(rad) { return (Math.random() + Math.random() - 1) * rad; }   // 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 // Aim-error half-width for a difficulty in [0..1] (0 = easiest, 1 = hardest).
+// Quadratic in the headroom left on the slider: zero at difficulty 1 by
+// construction, no special case needed.
 function aimJitterRad(difficulty) {
   const t = clamp(difficulty, 0, 1);
-  return JITTER_EASIEST_RAD * Math.pow(JITTER_HARDEST_RAD / JITTER_EASIEST_RAD, t);
+  const headroom = 1 - t;
+  return JITTER_EASIEST_RAD * headroom * headroom;
 }
 
 function distPointSegSq(px, pz, ax, az, bx, bz) {

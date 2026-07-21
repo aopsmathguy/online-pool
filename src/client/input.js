@@ -264,6 +264,21 @@ export function bindInput(canvas, handlers) {
     if (k) moveKeys[k] = false;
   });
 
+  // A clicked button/slider keeps focus, and then it — not the game — owns the
+  // keyboard: Space re-fires the button instead of flying the camera up, and the
+  // arrows scrub the range control. Hand focus back to the page once the pointer
+  // is done with it. Tabbing still focuses normally, so keyboard nav survives.
+  document.addEventListener('pointerup', () => {
+    const el = document.activeElement;
+    if (!el || isTextEntry(el)) return;
+    if (el.tagName === 'BUTTON' || (el.tagName === 'INPUT' && el.type === 'range')) el.blur();
+  });
+  // Selects are left alone above (blurring mid-pointer would shut the open
+  // dropdown); drop them once a choice has actually been committed.
+  document.addEventListener('change', e => {
+    if (e.target && e.target.tagName === 'SELECT') e.target.blur();
+  });
+
   // ---- On-screen controls (bottom-right): zoom + free-camera movement ----------
   let zoomTimer = null;
   const startZoom = (dir) => { zoomStep(dir); clearInterval(zoomTimer); zoomTimer = setInterval(() => zoomStep(dir), 90); };
