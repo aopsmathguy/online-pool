@@ -6,7 +6,8 @@
 //       build power (the tip marks how much), release to fire; ESC cancels.
 //   - Zoom: the on-screen +/- buttons (aim + overhead), the mouse wheel, or a
 //       two-finger pinch (aim slides along the stick; overhead also pans).
-//   - V cycles the camera; the on-screen view button does the same.
+//   - V swaps aim ↔ overhead, F toggles free view; the on-screen view button
+//       cycles through all three.
 //   - Ball-in-hand: drag to position the cue ball, release to place it.
 import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getPullback, setPullback, getMaxPullback,
@@ -28,6 +29,7 @@ export function bindInput(canvas, handlers) {
     isOverCueBall = () => false,
     onPlaceMove = () => {},
     onToggleView = () => {},
+    onToggleFree = () => {},
     onZoom = () => {},
   } = handlers;
 
@@ -255,6 +257,7 @@ export function bindInput(canvas, handlers) {
     if (isTextEntry(e.target)) return;
     if (drag === 'power' && e.key === 'Escape') { drag = null; dragId = null; setPullback(0); e.preventDefault(); return; }
     if (e.key === 'v' || e.key === 'V') onToggleView();
+    if (e.key === 'f' || e.key === 'F') onToggleFree();
     const k = moveKeyFor(e);
     if (k && getViewMode() === 'free') { moveKeys[k] = true; e.preventDefault(); return; }
     if (e.key === 'x' || e.key === 'X') { resetStrikeOffset(); e.preventDefault(); }

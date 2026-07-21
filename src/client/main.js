@@ -134,9 +134,11 @@ function confirmPlace() {
   if (gs.interact === PH_PLACING && myTurn()) socket.emit('placeConfirm', {});
 }
 let input = null;
-// V-key cycles the camera preference: 'aim' (down the stick) → 'free'
-// (fly-around) → 'top' (overhead). Resolved against game state each frame.
+// Camera preference: 'aim' (down the stick), 'free' (fly-around) or 'top'
+// (overhead). V swaps the two table views, F toggles free. Resolved against
+// game state each frame.
 let camPref = 'aim';
+let lastTableView = 'aim';   // the aim/top view F returns to when leaving free
 let shotFallback = null;   // releases the drawn stick if a shot never lands
 let ballCount = 15;         // object balls in play (15 for 8-ball, 9 for 9-ball)
 const railPoints = densify(rail_pts(tableW, tableH));   // sampled rail for cue-clearance
@@ -196,7 +198,8 @@ function buildScene() {
     // it would aim at stale ball positions.
     isReady:  () => net.inGame && net.connected && isLive() && gs.interact === PH_AIMING && myTurn(),
     isPlacing: () => net.inGame && net.connected && isLive() && gs.interact === PH_PLACING && myTurn(),
-    onToggleView: cycleView,                            // V: cycle aim → free → top
+    onToggleView: swapTableView,                       // V: swap aim ↔ overhead
+    onToggleFree: toggleFreeView,                      // F: free-fly on/off
     onZoom: (deltaY) => zoomCamera(deltaY),            // scroll: dolly the camera
     isOverCueBall,
     onPlaceMove: (clientX, clientY) => {
@@ -396,11 +399,11 @@ function applyGameState(state) {
   const wasPlacing = gs.interact === PH_PLACING;
   gs = state;
   // MY ball-in-hand starts overhead (it is a whole-table decision) and drops
-  // back to aim once I have placed it. Both are NUDGES, not locks: V still
-  // cycles to any view and nothing forces it back. The opponent's placement
+  // back to aim once I have placed it. Both are NUDGES, not locks: V and F still
+  // reach any view and nothing forces it back. The opponent's placement
   // never touches the camera — their turn is not a reason to move my view.
-  if (myTurn() && gs.interact === PH_PLACING && !wasPlacing) camPref = 'top';
-  if (myTurn() && gs.interact === PH_AIMING && wasPlacing) camPref = 'aim';
+  if (myTurn() && gs.interact === PH_PLACING && !wasPlacing) setView('top');
+  if (myTurn() && gs.interact === PH_AIMING && wasPlacing) setView('aim');
   renderHUD(gs);                  // sidebar: players + status (pocketed now on the HUD canvas)
   placeBotSlider();               // re-attach the difficulty slider to the bot chip
   if (gs.winner >= 0) { $('sideMenu').classList.remove('collapsed'); openReviewPanel(); }   // game over → surface the replay controls
@@ -609,24 +612,46 @@ function maybeSendAim(now) {
   socket.emit('aim', { yaw: getYaw(), pitch: getPitch(), strikeX: s.x, strikeY: s.y, pullback: getPullback() });
 }
 
-// ---- Camera view cycling + on-screen controls -------------------------------
-// V key and the on-screen view button both cycle aim → free → overhead.
-function cycleView() {
-  camPref = camPref === 'aim' ? 'free' : camPref === 'free' ? 'top' : 'aim';
-  if (camPref === 'free') initFreeCamFromCurrent();
+// ---- Camera views + on-screen controls --------------------------------------
+// Aim and overhead are the two views you actually play from; free-fly is a
+// detour off whichever of them you were in, which is why it is its own toggle
+// rather than a third stop on a cycle. Each has one key and one button.
+function setView(v) {
+  camPref = v;
+  if (v === 'free') initFreeCamFromCurrent();
+  else lastTableView = v;
   // Overhead pan/zoom persist across view switches (recentred only on new game),
   // so returning to bird's-eye restores your last overhead framing.
 }
-$('viewBtn').addEventListener('click', cycleView);
+// V: swap aim ↔ overhead. Pressed in free-fly it lands on the table view you
+// left, so the first press is always "put me back on the table". The button
+// labels itself from the same function, so the icon can't promise a different
+// view than the click delivers.
+function nextTableView() {
+  return camPref === 'free' ? lastTableView : lastTableView === 'top' ? 'aim' : 'top';
+}
+function swapTableView() { setView(nextTableView()); }
+// F: in and out of free-fly, returning to the table view you came from.
+function toggleFreeView() {
+  setView(camPref === 'free' ? lastTableView : 'free');
+}
+$('viewBtn').addEventListener('click', swapTableView);
+$('freeBtn').addEventListener('click', toggleFreeView);
 
-const VIEW_ICONS = { aim: '🎯', free: '🎥', top: '⬇️' };
-const VIEW_NAMES = { aim: 'Aim (down cue)', free: 'Free fly-around', top: 'Overhead' };
-// Reflect the current view in the button icon and show the matching bottom-right
-// controls: zoom in aim/overhead, the movement pad in free-fly.
+const VIEW_ICONS = { aim: '🎯', top: '⬇️' };
+const VIEW_NAMES = { aim: 'Aim (down cue)', top: 'Overhead' };
+// The swap button advertises where it will TAKE you, not where you are — it is
+// the only thing it does, and the current view is already on screen. Free-cam is
+// a toggle, so it lights up instead. Bottom-right controls follow the view:
+// zoom in aim/overhead, the movement pad in free-fly.
 function updateViewUi(view) {
+  const next = nextTableView();
   const vb = $('viewBtn');
-  vb.textContent = VIEW_ICONS[view] || '🎯';
-  vb.title = `View: ${VIEW_NAMES[view] || view} — tap to change`;
+  vb.textContent = VIEW_ICONS[next];
+  vb.title = `Switch to ${VIEW_NAMES[next]} (V)`;
+  const fb = $('freeBtn');
+  fb.classList.toggle('on', view === 'free');
+  fb.title = view === 'free' ? 'Leave free camera (F)' : 'Free camera (F)';
   $('zoomControls').classList.toggle('hidden', !(view === 'aim' || view === 'top'));
   $('freeControls').classList.toggle('hidden', view !== 'free');
 }

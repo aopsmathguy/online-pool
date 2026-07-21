@@ -110,8 +110,9 @@
               the <b>spin dial</b> (bottom-left cue-ball face) to set spin (<b>X</b>
               recenters). To shoot, grab the cue stick over the <b>power bar</b> on the left
               and drag it <b>down</b> — the tip shows how much power — then release. <b>V</b>
-              cycles the camera: down-the-stick aim → free fly-around (drag to look,
-              <b>WASD</b> move, <b>Space</b>/<b>Shift</b> up/down) → overhead.</p>
+              swaps between down-the-stick aim and overhead; <b>F</b> toggles the free
+              fly-around view (drag to look, <b>WASD</b> move, <b>Space</b>/<b>Shift</b>
+              up/down).</p>
               <p>After a foul the other player gets <b>ball in hand</b> (overhead view — move
               the mouse to position the cue ball, then click to place it).</p>
             </div>
@@ -135,9 +136,12 @@
       <!-- Ball-in-hand: appears next to the cue ball; tap to place it there. -->
       <button id="placeConfirm" class="placeConfirm hidden" title="Place the ball here" aria-label="Place ball">✓</button>
 
-      <!-- Bottom-left: tap to cycle the camera (aim → free → overhead); the icon
-           shows the current view. Mirrors the V key. -->
-      <button id="viewBtn" class="viewBtn" title="Change view">🎯</button>
+      <!-- Bottom-left camera buttons, one per key: swap aim ↔ overhead (V, icon
+           shows the view it will take you to) and free-cam on/off (F). -->
+      <div id="viewBtns" class="viewBtns">
+        <button id="viewBtn" class="viewBtn" title="Change view">⬇️</button>
+        <button id="freeBtn" class="viewBtn" title="Free camera">🎥</button>
+      </div>
 
       <!-- Bottom-right touch controls. Zoom shows in aim / overhead; the movement
            pad shows in free-fly. main.js toggles them by view. -->

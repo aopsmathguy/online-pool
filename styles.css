@@ -114,7 +114,7 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 /* Lift the other bottom-anchored controls clear of the bar while it is up.
    The HUD canvas (spin dial, pocketed column) is shifted in JS instead — see
    bottomInset in hudCanvas.js. */
-body.reviewing .viewBtn { bottom:80px; }
+body.reviewing .viewBtns { bottom:80px; }
 body.reviewing .ctrlCluster { bottom:76px; }
 body.reviewing .netBanner { bottom:70px; }
 
@@ -126,12 +126,15 @@ body.reviewing .netBanner { bottom:70px; }
 }
 
 /* ===== In-game touch controls ===== */
-/* Tap-to-cycle camera view (bottom-left, beside the spin dial); icon = current view. */
-.viewBtn { position:absolute; left:120px; bottom:24px; z-index:5;
-  width:54px; height:54px; font-size:26px; line-height:1; padding:0;
+/* Camera buttons (bottom-left, beside the spin dial): swap aim/overhead, and
+   free-cam on/off. The pair sits in one row so the reviewing lift moves both. */
+.viewBtns { position:absolute; left:120px; bottom:24px; z-index:5; display:flex; gap:8px; }
+.viewBtn { width:54px; height:54px; font-size:26px; line-height:1; padding:0;
   background:rgba(22,32,74,0.9); border:1px solid #2a3566; border-radius:12px;
   cursor:pointer; touch-action:none; -webkit-touch-callout:none; user-select:none; }
 .viewBtn:hover { background:#1c2a5e; }
+/* Free-cam is a toggle, so it reads as lit while you are flying. */
+.viewBtn.on { background:#24408f; border-color:#4a6adf; }
 
 /* Ball-in-hand ✓ button — floats next to the cue ball (positioned in main.js). */
 .placeConfirm { position:absolute; z-index:6; transform:translateY(-50%);
