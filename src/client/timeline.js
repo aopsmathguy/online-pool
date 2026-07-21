@@ -199,6 +199,9 @@ export function createTimeline({
 
   // Open a past shot deliberately — this is what "reviewing" is. Stops
   // following, so live shots pile up in the log instead of yanking the view.
+  // A shot opened here is never marked watched, however far it is played: the
+  // queue is what you have seen LIVE, and reviewing does not consume it (see
+  // finish). Exit and it plays out in order like anything else you missed.
   function seek(slot) {
     const e = at(slot);
     if (!e) return;
@@ -239,10 +242,25 @@ export function createTimeline({
   }
 
   // The shot on screen reached its end.
+  //
+  // `watched` means SEEN ON THE LIVE FEED, and only this path can set it.
+  // Opening a shot from the replay list is a side channel: it shows you the
+  // shot, but it does not consume it from the queue, so anything reviewed out
+  // of band still plays out in order once you go back to live. Reviewing five
+  // of the opponent's shots therefore leaves five shots to watch — deliberately.
+  //
+  // The alternative — letting a review mark a shot watched — is what produced
+  // the reported bug. A shot's `post` is the ONLY carrier of the state it
+  // resolved to (there are no separate post-shot packets, and nothing re-sends
+  // it), and `post` is adopted here, on the live feed. A review that consumed
+  // the shot would consume its outcome with it: review the shot you are
+  // watching, let the opponent reply, review that too, exit — and the table,
+  // the turn and the pocketed column all roll back to before your own shot,
+  // for the rest of the rack.
   function finish() {
     const e = at(playhead.slot);
-    if (e) e.watched = true;
     if (following) {
+      if (e) e.watched = true;
       hideCue();
       playhead = null;
       if (e && e.post) adoptLive(e.post);   // its outcome, exactly now and not before

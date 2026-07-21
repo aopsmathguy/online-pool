@@ -55,6 +55,38 @@ describe('replay + resume', { skip }, () => {
   before(async () => { b = await launch({ query: '?bot' }); }, { timeout: 60_000 });
   after(async () => { if (b) await b.close(); });
 
+  // ---- driving the replay list, for the review tests -------------------------
+
+  // Open a shot from the dropdown, exactly as a player does.
+  const openShot = (slot) => `(() => {
+    const s = document.getElementById('replaySelect');
+    s.value = '${slot}'; s.dispatchEvent(new Event('change'));
+  })()`;
+
+  // Run the shot on screen OUT to its last frame.
+  //
+  // Scrubs to the final few percent and plays only those: headless Chrome
+  // throttles rAF and tick() clamps dt to 100 ms, so a replay runs several
+  // times slower than real time and playing an 8-second shot in full costs
+  // most of a minute. Everything that matters happens at the END of playback
+  // (finish()), and this reaches it through the real transport.
+  const playOut = async (slot, { via = 'scrub' } = {}) => {
+    if (slot != null) {
+      await b.waitFor(`window.__reviewHistory()[${slot}] && !!window.__reviewHistory()[${slot}].anim`,
+        { timeout: 20_000, what: `shot ${slot} to be open` });
+    }
+    await b.evaluate(`(() => {
+      const s = document.getElementById('replayScrub');
+      s.value = '970'; s.dispatchEvent(new Event('input'));
+      document.getElementById('replayPlay').click();
+    })()`);
+    if (via === 'scrub') {
+      // Reviewing: the transport parks at the end and stays there.
+      await b.waitFor(`document.getElementById('replayScrub').value === '1000'`,
+        { timeout: 60_000, what: `the review of shot ${slot} to reach its end` });
+    }
+  };
+
   test('a shot is on screen before its outcome is', async () => {
     await b.waitFor(`window.__net.me().inGame`, { what: 'game to start' });
     await b.evaluate(`window.__net.socket.emit('placeConfirm', {})`);
@@ -235,6 +267,192 @@ describe('replay + resume', { skip }, () => {
         + `(${JSON.stringify(settled)} -> ${JSON.stringify(atStrike)}) — it is not where you aim from`);
     }
   }, { timeout: 240_000 });
+
+  test('reviewing a shot does not consume it, or its outcome', async () => {
+    // THE reported bug: open the replay of the shot you are CURRENTLY watching,
+    // let the opponent play on, review their shot too, then exit — and the
+    // table, the turn and the pocketed column all snap back to before your own
+    // shot, for the rest of the rack.
+    //
+    // A shot's `post` is the ONLY carrier of the state it resolved to (nothing
+    // re-sends it), and it is adopted when the shot plays out on the LIVE feed.
+    // Marking a reviewed shot watched removed it from that feed, so its outcome
+    // was never adopted by anyone. Hence the rule this test pins down: a review
+    // shows you a shot, it does not consume it. Reviewed shots still play out in
+    // order when you exit, and their outcomes land as they do. Running a
+    // reviewed shot to its END is what makes this the bug's scenario: the old
+    // rule marked a shot watched when its playback finished, wherever it played.
+    await b.freshGame();
+    await b.evaluate(`window.__net.socket.emit('placeConfirm', {})`);
+    await b.waitFor(`(window.__net.state()||{}).interact === 0`, { what: 'aiming' });
+    await b.evaluate(`window.__net.socket.emit('shoot', {yaw:0.05,pitch:0.06,strikeX:0,strikeY:0,power:0.9})`);
+    await b.waitFor(`window.__replay().playing`, { timeout: 40_000, what: 'my shot to start' });
+
+    // Open MY shot from the list while it is still the one on screen.
+    await b.evaluate(openShot(0));
+    await b.waitFor(`window.__replay().following === false`, { what: 'the review to take over' });
+    await playOut(0);
+
+    // Now let the game go on without leaving the review. The server does not
+    // care what our playhead shows; if the break left the turn with me, drive
+    // it from the last shot's `post` (the only current truth we can read while
+    // reviewing) until a second shot exists.
+    const nudge = `(() => {
+      const es = window.__reviewHistory();
+      const post = es.length ? es[es.length - 1].post : null;
+      if (!post || post.state.current !== window.__net.me().myIndex) return false;
+      if (post.state.interact === 2) window.__net.socket.emit('placeConfirm', {});
+      else if (post.state.interact === 0) {
+        window.__net.socket.emit('shoot', {yaw:${Math.random() * 6},pitch:0.06,strikeX:0,strikeY:0,power:0.5});
+      }
+      return true;
+    })()`;
+    for (let i = 0; i < 40; i++) {
+      if (await b.evaluate(`window.__reviewHistory().length >= 2`)) break;
+      await b.evaluate(nudge);
+      await sleep(1500);
+    }
+    assert.ok(await b.evaluate(`window.__reviewHistory().length >= 2`),
+      'no second shot was ever taken, so the scenario never happened');
+
+    // Review that shot too, then exit — the player's last act in the report.
+    await b.evaluate(openShot(1));
+    await playOut(1);
+
+    // Neither review consumed its shot: both are still owed to the live feed.
+    const unwatched = await b.evaluate(
+      `window.__reviewHistory().slice(0, 2).filter(e => !e.watched).length`);
+    assert.equal(unwatched, 2,
+      'reviewing a shot marked it watched — it will never play out live, and its outcome dies with it');
+
+    await b.evaluate(`document.getElementById('replayExit').click()`);
+    assert.ok(await b.evaluate(`!window.__replay().live`),
+      'exiting the review went straight to live; the reviewed shots should still play out');
+
+    // As each one plays out live it hands over its outcome, so what is on screen
+    // must always be the `post` of the LAST shot to have played out — which is
+    // read here rather than assumed, because the drain may already have moved
+    // on to a shot the bot took while we were reviewing.
+    //
+    // Deliberately not "wait for the queue to empty": headless Chrome throttles
+    // rAF and tick() clamps dt to 100 ms, so replays run several times slower
+    // than real time and a bot on a run can append shots faster than they drain.
+    // Waiting for shot 1 to have played out needs only a bounded number of them.
+    //
+    // Built in ONE expression: a shot finishing between two evaluates would move
+    // both sides of the comparison, and a torn read would look like the bug.
+    const cmp = JSON.parse(await b.waitFor(`(() => { try {
+      const es = window.__reviewHistory();
+      let last = -1;
+      for (let i = 0; i < es.length; i++) if (es[i].watched && es[i].post) last = i;
+      if (last < 1) return null;      // both reviewed shots must have played out
+      const post = es[last].post;
+      const gs = window.__net.state() || {};
+      const ids = (xs) => xs.slice().sort((a, b) => a - b);
+      return JSON.stringify({
+        last,
+        turn: gs.current, wantTurn: post.state.current,
+        interact: gs.interact, wantInteract: post.state.interact,
+        message: gs.message, wantMessage: post.state.message,
+        pocketed: ids(gs.pocketed || []), wantPocketed: ids(post.state.pocketed || []),
+        // Ball IDS only, not positions: the playhead may already be part-way
+        // through the NEXT shot, whose frames move balls around. Its opening
+        // frame is this shot's outcome, so the SET still has to match.
+        rendered: ids(window.__ballIds().map(b => b.id)),
+        wantRendered: ids(post.balls.items.map(b => b.id)),
+      });
+    } catch (e) { return null; } })()`, { timeout: 240_000, what: 'the reviewed shots to play out live' }));
+
+    assert.equal(cmp.turn, cmp.wantTurn, `exiting the review left the turn stale: ${JSON.stringify(cmp)}`);
+    assert.equal(cmp.interact, cmp.wantInteract, `exiting the review left the phase stale: ${JSON.stringify(cmp)}`);
+    assert.equal(cmp.message, cmp.wantMessage, `exiting the review left the HUD stale: ${JSON.stringify(cmp)}`);
+    assert.deepEqual(cmp.pocketed, cmp.wantPocketed,
+      `the pocketed column rolled back to before the reviewed shots: ${JSON.stringify(cmp)}`);
+    assert.deepEqual(cmp.rendered, cmp.wantRendered,
+      `the rack rolled back to before the reviewed shots: ${JSON.stringify(cmp)}`);
+    assertInvariant(await snap(b), 'after reviewing every shot');
+  }, { timeout: 480_000 });
+
+  test('a game the computer FINISHES while you review still ends on screen', async () => {
+    // The reported variant of the above: same sequence, but the computer wins
+    // the rack while the replay list is open. The winning shot's `post` is the
+    // only thing that carries the win — nothing re-sends it — so a review that
+    // consumed that shot would leave the game over on the server and still in
+    // progress on screen: a banner that never shows and a turn that never comes.
+    await b.freshGame();
+    await b.evaluate(`(() => {
+      const s = document.getElementById('botSkillSlider');
+      s.value = '100'; s.dispatchEvent(new Event('input'));   // let it run the table
+      window.__net.socket.emit('placeConfirm', {});
+    })()`);
+    await b.waitFor(`(window.__net.state()||{}).interact === 0`, { what: 'aiming' });
+    await b.evaluate(`window.__net.socket.emit('shoot', {yaw:0.05,pitch:0.06,strikeX:0,strikeY:0,power:0.95})`);
+    await b.waitFor(`window.__replay().playing`, { timeout: 40_000, what: 'the break to start' });
+
+    // Into the review list and STAY there while the computer plays the rack out.
+    await b.evaluate(openShot(0));
+    await b.waitFor(`window.__replay().following === false`, { what: 'the review to take over' });
+    await playOut(0);
+
+    // The last shot's `post` is the only present-tense truth readable from
+    // inside a review, so it is also how the test knows the game has ended.
+    // Hand the turn straight back whenever it comes to me: a deliberately soft
+    // shot fouls (no rail, no contact), which is ball-in-hand for the computer
+    // and the fastest way to let it run out.
+    const lastState = `(() => { const es = window.__reviewHistory();
+      const p = es.length ? es[es.length - 1].post : null;
+      return JSON.stringify(p ? p.state : null); })()`;
+    // Budget: the computer needs its 7 balls plus the 8, at ~9 s a shot with a
+    // few of my fouls in between — around 150 s when it runs cleanly, and it
+    // does not always. 300 s leaves room without hiding a genuine stall.
+    let over = false;
+    for (let i = 0; i < 150 && !over; i++) {
+      const st = JSON.parse(await b.evaluate(lastState) || 'null');
+      if (st && st.winner >= 0) { over = true; break; }
+      if (st && st.current === await b.evaluate(`window.__net.me().myIndex`)) {
+        await b.evaluate(st.interact === 2
+          ? `window.__net.socket.emit('placeConfirm', {})`
+          : `window.__net.socket.emit('shoot', {yaw:1.3,pitch:0.06,strikeX:0,strikeY:0,power:0.05})`);
+      }
+      await sleep(2000);
+    }
+    assert.ok(over, 'the computer never finished the rack, so the scenario never happened');
+
+    // Review the winning shot too, then leave.
+    const last = await b.evaluate(`window.__reviewHistory().length - 1`);
+    await b.evaluate(openShot(last));
+    await playOut(last);
+    await b.evaluate(`document.getElementById('replayExit').click()`);
+
+    // Watch the backlog out. Jumping each shot to its last frames and letting it
+    // run out is the player's own transport driving the SAME finish() — it just
+    // spends seconds rather than the many minutes a real-time drain would cost
+    // under a throttled rAF. Nothing new can arrive: the rack is over.
+    for (let i = 0; i < 80; i++) {
+      if (await b.evaluate(`window.__replay().live`)) break;
+      await playOut(null, { via: 'drain' });
+      await sleep(900);
+    }
+    assert.ok(await b.evaluate(`window.__replay().live`),
+      'the backlog never drained after exiting the review');
+
+    const end = JSON.parse(await b.evaluate(`(() => {
+      const es = window.__reviewHistory();
+      const post = es[es.length - 1].post;
+      const gs = window.__net.state() || {};
+      return JSON.stringify({
+        winner: gs.winner, wantWinner: post.state.winner,
+        message: gs.message, wantMessage: post.state.message,
+        banner: document.getElementById('banner').classList.contains('show'),
+      });
+    })()`));
+    assert.ok(end.wantWinner >= 0, `the last shot did not carry the win: ${JSON.stringify(end)}`);
+    assert.equal(end.winner, end.wantWinner,
+      `the game ended on the server but not on screen: ${JSON.stringify(end)}`);
+    assert.equal(end.message, end.wantMessage, `the HUD never showed the result: ${JSON.stringify(end)}`);
+    assert.ok(end.banner, `no win banner after the rack ended: ${JSON.stringify(end)}`);
+    assertInvariant(await snap(b), 'after a game that ended during a review');
+  }, { timeout: 600_000 });
 
   test('New Game racks a fresh table instead of restoring the old one', async () => {
     // THE reported bug: press New Game and the previous game is still on screen.
