@@ -62,7 +62,16 @@ export const rail_cap = inset / 2;
 // the radius that lands the sides exactly tangent to those cups instead, so the
 // bottom section hugs all six cups at once.
 export const cabinetRBottom = 0.110;
-export const cabinetRTop    = cabinetRBottom + 0.055;
+export const cabinetRTop    = cabinetRBottom + 0.035;
+
+// The bullnose along the cabinet's top outer edge: a quarter-round rolling from
+// the deck's flat down onto the skirt, all the way around the loop. Because a
+// section is fixed by its radius alone, the roll is just a run of sections whose
+// radius sweeps a quarter circle inward — the widest one still lands at
+// cabinetRTop, so the table's footprint is unchanged and only the DECK loses
+// this much width. That flat is 0.13 m wide (inset out to cabinetRTop + 0.015),
+// so this has room to grow, but past ~0.03 it starts crowding the rail line.
+export const cabinetEdgeR = 0.018;
 
 // The deck is the flat ring of wood that closes the cabinet off at the top — a
 // single face with no thickness, so it has no underside to see. It sits at

@@ -4,7 +4,7 @@
 // moved to geometry.physics.js.
 import * as THREE from "/lib/three.module.js";
 import { table_parts, rail_solid, RAIL_FACES, cabinet_section, table_top_outline, pocket_positions } from '../shared/table.js';
-import { pocketWireY, inset, cabinetRTop } from '../shared/constants.js';
+import { pocketWireY, inset, cabinetRTop, cabinetEdgeR } from '../shared/constants.js';
 export { rail_pts, felt_pts, pocket_positions, table_parts } from '../shared/table.js';
 
 export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
@@ -337,6 +337,8 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
         color = 0x5c3a21,
         roughness = 0.62,
         segments = 24,
+        edgeR = cabinetEdgeR,
+        edgeSegments = 6,
       } = opts;
 
       const group = new THREE.Group();
@@ -349,32 +351,66 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
       mat.roughness = 1.0;
 
       // --- skirt ---------------------------------------------------------
-      const top = cabinet_section(tableW, tableH, rTop, segments);
-      const bot = cabinet_section(tableW, tableH, rBottom, segments);
-      const n = top.length;
+      // A stack of rings, lofted in order. Every ring is a cabinet_section, so
+      // they all carry the same point count and consecutive ones join as a plain
+      // index-for-index quad strip however many there are.
+      //
+      // The bullnose comes first: `edgeR` sweeps a quarter circle from the deck's
+      // flat (radius rTop - edgeR at yTop, tangent horizontal) out and down to the
+      // cabinet's widest section (rTop at yTop - edgeR, tangent vertical), from
+      // where the original taper carries on to the bottom. The roll is therefore
+      // paid for out of the DECK's width, not the footprint. The taper still needs
+      // only its two rings — radius is linear in height, so two describe it
+      // exactly.
+      const arc90 = [];
+      for (let i = 0; i <= edgeSegments; i++) {
+        const th = (i / edgeSegments) * (Math.PI / 2);
+        arc90.push({ r: rTop - edgeR + edgeR * Math.sin(th), y: yTop - edgeR + edgeR * Math.cos(th) });
+      }
+      const rings = [...arc90, { r: rBottom, y: yBottom }]
+        .map(({ r, y }) => ({ y, pts: cabinet_section(tableW, tableH, r, segments) }));
+      const n = rings[0].pts.length;
 
-      // UVs in METRES so the wood tiles at the same tiles-per-metre as the deck:
-      // U runs the cumulative arc length around the skirt, V is the vertical face.
-      // The ring closes with a single back seam at the wrap, which the wood's
-      // RepeatWrapping absorbs.
+      // UVs in METRES so the wood tiles at the same tiles-per-metre as the deck.
+      // U is the cumulative arc length around the ring, taken ONCE from the widest
+      // ring and reused for all of them: the rings are offsets of each other, so a
+      // shared U keeps the grain running in straight vertical lines instead of
+      // shearing as the perimeter shrinks. V is the cumulative distance DOWN the
+      // profile rather than the raw height, so the grain does not compress over the
+      // roll — a point moves by Δr laterally and Δy vertically between rings, and
+      // the surface distance is the hypotenuse. The ring closes with a single back
+      // seam at the wrap, which the wood's RepeatWrapping absorbs.
+      const widest = rings[arc90.length - 1].pts;
+      const uAt = [];
+      let arc = 0;
+      for (let i = 0; i < n; i++) {
+        if (i > 0) arc += Math.hypot(widest[i][0] - widest[i - 1][0], widest[i][1] - widest[i - 1][1]);
+        uAt.push(arc);
+      }
+
       const pos = [];
       const uv = [];
       const idx = [];
-      let arc = 0;
-      for (let i = 0; i < n; i++) {
-        if (i > 0) {
-          const dx = top[i][0] - top[i - 1][0], dz = top[i][1] - top[i - 1][1];
-          arc += Math.hypot(dx, dz);
+      let v = 0;
+      for (let k = 0; k < rings.length; k++) {
+        const ring = rings[k];
+        if (k > 0) {
+          const prev = rings[k - 1];
+          // Δr read off the straight sides, where the offset is the whole distance.
+          const dr = Math.hypot(ring.pts[0][0] - prev.pts[0][0], ring.pts[0][1] - prev.pts[0][1]);
+          v += Math.hypot(dr, ring.y - prev.y);
         }
-        pos.push(top[i][0], yTop, top[i][1]);
-        pos.push(bot[i][0], yBottom, bot[i][1]);
-        uv.push(arc, yTop);
-        uv.push(arc, yBottom);
+        for (let i = 0; i < n; i++) {
+          pos.push(ring.pts[i][0], ring.y, ring.pts[i][1]);
+          uv.push(uAt[i], v);
+        }
       }
-      for (let i = 0; i < n; i++) {
-        const a = 2 * i, b = a + 1;
-        const c = 2 * ((i + 1) % n), d = c + 1;   // wraps, closing the loop
-        idx.push(a, b, d, a, d, c);
+      for (let k = 0; k < rings.length - 1; k++) {
+        const row = k * n, next = (k + 1) * n;
+        for (let i = 0; i < n; i++) {
+          const j = (i + 1) % n;                 // wraps, closing the loop
+          idx.push(row + i, next + i, next + j, row + i, next + j, row + j);
+        }
       }
 
       const skirt = new THREE.BufferGeometry();
@@ -390,13 +426,16 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
 
       // --- deck and floor -------------------------------------------------
       // Each cap's outline IS the skirt ring at that height, so the three meet
-      // exactly with no seam to close.
+      // exactly with no seam to close. The deck now takes the bullnose's TOP ring,
+      // which the roll leaves tangent to it — the wood runs flat out to there and
+      // then turns over.
       const face = { color, roughness, metalness: 0.0, wood: true, castShadow: true, receiveShadow: true };
-      group.add(makePlanarMeshFromPolyline(top, 0, yTop, {
+      group.add(makePlanarMeshFromPolyline(rings[0].pts, 0, yTop, {
         ...face,
         holes: [table_top_outline(tableW, tableH)],
       }));
-      group.add(makePlanarMeshFromPolyline(bot, 0, yBottom, face));
+      const bottom = rings[rings.length - 1];
+      group.add(makePlanarMeshFromPolyline(bottom.pts, 0, bottom.y, face));
 
       return group;
 }
@@ -423,6 +462,7 @@ export function makeTableSights(tableW, tableH, opts = {}) {
         halfLen = 0.013,      // point-to-point ACROSS the rail (~1 in tip to tip)
         halfWid = 0.0075,     // point-to-point ALONG the rail
         lift = 0.001,         // sit just proud of the wood so it can't z-fight
+        gap = 0.04,          // diamond CENTRE out from the rail's outer edge
       } = opts;
 
       const p = pocket_positions(tableW, tableH);
@@ -430,14 +470,24 @@ export function makeTableSights(tableW, tableH, opts = {}) {
       const cornerZ = Math.abs(p[0][1]);   // corner-pocket centre |z|  (short-rail ends)
 
       // Back from the nose onto the wood deck's flat. The deck's inner edge is the
-      // rail's outer edge (`inset` out from the nose); its outer edge is the
-      // cabinet's top section — cabinetRTop past the corner-pocket centres, which
-      // themselves sit (cornerX - tableW/2) out from the nose. Sit the sight a
-      // third of the way across, so it rides closer to the rail than the outer
-      // edge, the way a real inlaid diamond hugs the cushion.
+      // rail's outer edge, `inset` out from the nose, and `gap` rides the sight a
+      // FIXED distance further out from there — the way a real inlaid diamond hugs
+      // the cushion at a set offset regardless of how wide the rest of the cabinet
+      // is. It was once a fraction of the wood band's width, which meant retuning
+      // cabinetRTop silently walked all 18 diamonds toward or away from the rail.
+      //
+      // The flat it has to fit on runs out to the cabinet's top section —
+      // cabinetRTop past the corner-pocket centres, which themselves sit
+      // (cornerX - tableW/2) out from the nose — less cabinetEdgeR, where the
+      // bullnose starts rolling over. `gap + halfLen` must stay inside that, or the
+      // outer tip creeps onto the roll; the assert says so rather than leaving a
+      // subtly bent diamond to be spotted by eye.
       const woodInner = inset;
-      const woodOuter = (cornerX - tableW / 2) + cabinetRTop;
-      const setback = woodInner + (woodOuter - woodInner) / 3;
+      const woodOuter = (cornerX - tableW / 2) + cabinetRTop - cabinetEdgeR;
+      const setback = woodInner + gap;
+      if (setback + halfLen > woodOuter) {
+        throw new Error(`sight gap ${gap} runs off the wood flat (${(woodOuter - woodInner).toFixed(3)} m wide)`);
+      }
       const y = pocketWireY + lift;
 
       // Long rails: x at the quarter divisions between a corner pocket (|x|=cornerX)
