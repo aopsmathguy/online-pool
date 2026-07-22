@@ -196,21 +196,31 @@ const WOOD_MAPS = {
 // skirt and the deck the same oak), built at whatever resolution and map count
 // the current preset asks for.
 //
-// Two dials, and they save different things:
-//   texMax     caps each map's edge, redrawing the decoded image into a smaller
-//              canvas. That is a VRAM and mip-chain saving only — the file still
-//              downloads at full size, because there is one file per map on
-//              disk. 4096 -> 1024 is 16x less texture memory for that map.
-//   normalMap/roughnessMap
-//              drop the map entirely, so it is never even fetched. This is the
-//              bandwidth dial: felt/normal.png alone is 11 MB, and anything
-//              below High never asks for it.
+// NEITHER dial here is about frame time — both measured at or under the 0.5 ms
+// noise floor. They save different resources, and mixing them up is how you end
+// up degrading an image for nothing:
+//   texMax     VRAM. Caps each map's edge by redrawing the decoded image into a
+//              smaller canvas. It does NOT save download — the file is fetched at
+//              full size and shrunk after decode, because there is one file per
+//              map on disk. What it saves is enormous though: the five scanned
+//              maps at 4K are ~380 MB of decoded texture once mipmapped, against
+//              ~28 MB at 1K. That is the difference between running and dying on
+//              a phone.
+//   normalMap  DOWNLOAD. Dropping the slot means it is never fetched, and
+//              felt/normal.png is 11 MB on its own — the only lever here that
+//              avoids a transfer at all.
+//
+// The roughness map is NOT a dial: it measured +0.2 ms in both contexts, it is a
+// fraction of the normal map's size, and it carries the whole sheen of the grain.
+// Anisotropy is pinned at 16 for the same reason — 1 -> 16 measured 0.0 / +0.2 ms
+// even on the 4K bed at a grazing angle, which is the worst case for it.
 //
 // Every slot a preset omits must be actively nulled on the material rather than
 // just left out of the assign — a material built at Ultra and then dropped to
 // Low would otherwise keep the very maps the preset is trying to shed. That is
 // what TEX_SLOTS is for.
 const TEX_SLOTS = ['map', 'normalMap', 'roughnessMap'];
+const ANISOTROPY = 16;
 
 function buildTextureSet(maps, repeat) {
       const q = qualityLevel();
@@ -218,7 +228,6 @@ function buildTextureSet(maps, repeat) {
       const out = {};
       for (const [slot, url] of Object.entries(maps)) {
         if (slot === 'normalMap' && !q.normalMap) continue;
-        if (slot === 'roughnessMap' && !q.roughnessMap) continue;
         // The image is decoded at full size and then shrunk in place: three has
         // already stamped it onto the texture by the time onLoad runs, so
         // swapping .image and re-flagging it is what makes the upload use the
@@ -229,7 +238,7 @@ function buildTextureSet(maps, repeat) {
         });
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
         tex.repeat.set(repeat, repeat);
-        tex.anisotropy = q.anisotropy;
+        tex.anisotropy = ANISOTROPY;
         // Only the colour map is authored in sRGB; normal/roughness are data.
         if (slot === 'map') tex.colorSpace = THREE.SRGBColorSpace;
         out[slot] = tex;
@@ -275,7 +284,7 @@ function applyFelt(mat) {
       // roughnessMap MULTIPLIES this, so 1.0 is "let the map decide". With no
       // map that same 1.0 is a real value — dead matte, which for worsted cloth
       // is close enough to right that the low presets need no other fix-up.
-      mat.roughness = set.roughnessMap ? 1.0 : 0.95;
+      mat.roughness = 1.0;
       mat.normalScale = new THREE.Vector2(0.6, 0.6);
       mat.needsUpdate = true;
       return mat;
@@ -290,7 +299,7 @@ function applyWood(mat) {
       const set = woodSet();
       for (const slot of TEX_SLOTS) mat[slot] = set[slot] || null;
       mat.color.set(0xffffff);
-      mat.roughness = set.roughnessMap ? 1.0 : 0.62;
+      mat.roughness = 1.0;
       mat.needsUpdate = true;
       return mat;
 }

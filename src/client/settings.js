@@ -1,10 +1,11 @@
 // src/client/settings.js — player options (the ≡ menu's "Options" panel).
 //
-// Two settings, both persisted in localStorage (they are per-device preferences,
-// not per-tab like the session token) and both applied LIVE: changing either one
-// never rebuilds the scene or reloads the page.
+// Three settings, all persisted in localStorage (they are per-device
+// preferences, not per-tab like the session token) and all applied LIVE:
+// changing one never rebuilds the scene or reloads the page.
 //
 //   reverseAim — flips the direction the aim drag turns the cue.
+//   showFps    — the frame-rate readout in the top-right corner.
 //   quality    — one of five graphics presets, below.
 //
 // This module owns the values and nothing else. The three modules that actually
@@ -15,84 +16,121 @@
 
 // ---- The five presets ---------------------------------------------------------
 //
-// Each step down sheds the most expensive thing left. Measured on an M5 through
-// headless Chrome (ANGLE/Metal) at 2800x1800, median frame time with the pixel
-// ratio pinned at 1 so the resolution dial doesn't mask the rest:
+// These are built from a per-feature ablation, not from intuition. Each feature
+// was toggled on and off BACK TO BACK (so drift cancels in the difference) in two
+// contexts — a lean scene and a fully loaded one — on an M5 through headless
+// Chrome (ANGLE/Metal) at 1400x900 CSS, devicePixelRatio 3, vsync off. Median of
+// 3 paired differences; the noise floor is about 0.5 ms.
 //
-//   Ultra    7.3 ms
-//   High     5.8 ms   -- drop the 4 grazing fill lights' shadows (7 shadow maps
-//                        become 3). Costs only the soft band the rails drop onto
-//                        the cloth, which reads mostly from the overhead view.
-//   Medium   5.1 ms   -- halve the lamp shadow maps (2048->1024), drop the normal
-//                        map, halve the scanned textures (4K->2K).
-//   Low      2.4 ms   -- one shadow-casting lamp instead of three, 512 maps, hard
-//                        PCF instead of the soft kernel, colour maps only at 1K.
-//   Minimum  1.1 ms   -- no real-time shadows at all, 512 colour maps.
+//                            lean scene   loaded scene
+//   side lights CAST           +6.2 ms      +5.3 ms
+//   shadows at all (0->1 lamp) +1.9         (n/a *)
+//   lamps casting 1 -> 3       +1.8         +0.6
+//   side lights LIT            +1.4         +0.8
+//   ------------------------------------ noise floor ----
+//   normal map                 +0.2         +0.6
+//   roughness map              +0.2         +0.2
+//   ball mesh 24 -> 64 segs    +0.1         +0.4
+//   soft PCF vs hard            0.0         -1.0
+//   shadow map 512 -> 2048      0.0         -0.2
+//   anisotropy 1 -> 16          0.0         +0.2
+//   ball texture 256 -> 1024    0.0         +0.2
+//   scanned textures 512 -> 4K -0.2         -1.6
 //
-// So what actually costs: how many lights cast and how the filter samples. Map
-// SIZE and texture resolution barely move a desktop GPU at all — they are in
-// here for memory rather than for milliseconds, which is the constraint that
-// bites first on a phone (7 maps at 2048 is ~50 MB of depth texture, and the
-// felt set alone is ~100 MB of texture at 4K).
+//   * in the loaded scene the side lights are already casting, so switching
+//     shadows off kills all five maps at once (+8.6 ms) rather than isolating the
+//     one lamp. The lean column is the clean number for a single lamp.
 //
-// The exception is `maxPixelRatio`, which is the single biggest lever the moment
-// there is a retina display under it — at devicePixelRatio 3 the same sweep runs
-// 8.3 / 6.0 / 1.0 / 0.8 / 0.6 ms, and nearly all of that Medium-to-High cliff is
-// 1.5x pixels becoming 2x. It is the last dial rather than the first because it
-// is also the one you SEE, on every edge on the screen.
+// THE WHOLE BUDGET IS SHADOWS AND LIGHT COUNT. Nothing else clears the noise
+// floor. That is why the ladder below moves exactly four things, in cost order:
+// whether the side lights cast, whether they are lit, how many lamps cast, and
+// whether anything casts at all. The span those four cover is the span of the
+// slider — roughly 14.6 ms at the top to 3.7 ms at the bottom.
+//
+// Everything under the line is PINNED AT ITS BEST VALUE and is not a dial:
+// the soft PCF filter, 2048 shadow maps, and anisotropy 16 all measured free, so
+// degrading them would cost looks and buy nothing. An earlier cut of these
+// presets spent four of its dials down there; it was trading away image quality
+// for zero milliseconds, which is the worst deal available.
+//
+// The three that remain below the line — texMax, normalMap, ballTex/ballSegs —
+// are kept as dials for reasons that are NOT frame time, and the distinction is
+// worth preserving when retuning:
+//   texMax     VRAM. Free in time, enormous in memory: the five scanned maps at
+//              4K are ~380 MB of decoded texture with mipmaps, against ~28 MB at
+//              1K. That is an out-of-memory on a phone, not a slow frame. Note it
+//              does NOT save download — the file is fetched at full size and
+//              shrunk after decode, because there is one file per map on disk.
+//   normalMap  DOWNLOAD. felt/normal.png is 11 MB on its own, and dropping the
+//              slot is the only lever here that actually avoids a fetch.
+//   ballSegs   vertex throughput, which this desktop GPU does not care about
+//              (+0.4 ms for 16 balls at 64 segments across 7 shadow passes) but a
+//              weak mobile one might.
+//
+// RESOLUTION IS NOT ONE OF THE DIALS. It is by far the largest lever available —
+// an earlier cut capped the pixel ratio per level, and that cap alone was worth
+// more than every other setting put together (Medium ran 1.0 ms against High's
+// 6.0 on a dpr-3 display, almost all of it 1.5x pixels against 2x) — and it is
+// left on the table deliberately. Every preset renders at the display's full
+// ratio; see scene.js fitCanvas. Resolution is the one cost that buys sharpness
+// in everything at once, and the one the eye reads first. Everything above is a
+// trade you can look at and accept; a soft image is not.
 //
 // `shadowBulbs` is how many of the three overhead lamps cast — the centre one
-// first (scene.js hangs them centre-first for exactly this reason), because it
-// is the lamp over the middle of the table and its cone covers the most balls.
-// The other two keep LIGHTING the cloth either way; they just stop casting, so
-// dropping to one is a shadow change, not a lighting change.
+// first (scene.js hangs them centre-first for exactly this reason), because it is
+// the lamp over the middle of the table and its cone covers the most balls. The
+// other two keep LIGHTING the cloth either way; they just stop casting. The three
+// lamps are never unlit at any preset: they are what you read the table by, and a
+// rack lit from one point plays worse, not just looks worse.
+//
+// `sideLights` vs `sideShadows` is the same split for the four grazing fills, and
+// it is the one that matters most. Lit-but-not-casting costs 0.8 ms; casting
+// costs another 5.3. What you lose by unlighting them entirely is a highlight per
+// ball (seven specular dots become three) and the lift on the cabinet's outward
+// faces, which then falls back on the ambient.
 export const QUALITY_LEVELS = [
   {
     name: 'Minimum',
-    blurb: 'No shadows. Flat colour maps.',
-    shadows: false, shadowBulbs: 0, sideShadows: false, shadowMapSize: 512, softShadows: false,
-    texMax: 512, normalMap: false, roughnessMap: false, anisotropy: 1,
-    ballTex: 256, maxPixelRatio: 1,
+    blurb: 'No shadows. Overhead lamps only.',
+    shadows: false, shadowBulbs: 0, sideLights: false, sideShadows: false,
+    texMax: 1024, normalMap: false, ballTex: 512, ballSegs: 32,
   },
   {
     name: 'Low',
-    blurb: 'One shadow lamp. Colour maps only.',
-    shadows: true, shadowBulbs: 1, sideShadows: false, shadowMapSize: 512, softShadows: false,
-    texMax: 1024, normalMap: false, roughnessMap: false, anisotropy: 2,
-    ballTex: 512, maxPixelRatio: 1,
+    blurb: 'One lamp casts. No side lights.',
+    shadows: true, shadowBulbs: 1, sideLights: false, sideShadows: false,
+    texMax: 1024, normalMap: false, ballTex: 512, ballSegs: 32,
   },
   {
     name: 'Medium',
-    blurb: 'Three shadow lamps. No normal map.',
-    shadows: true, shadowBulbs: 3, sideShadows: false, shadowMapSize: 1024, softShadows: true,
-    texMax: 2048, normalMap: false, roughnessMap: true, anisotropy: 4,
-    ballTex: 512, maxPixelRatio: 1.5,
+    blurb: 'Side lights lit. One lamp casts.',
+    shadows: true, shadowBulbs: 1, sideLights: true, sideShadows: false,
+    texMax: 2048, normalMap: true, ballTex: 1024, ballSegs: 48,
   },
   {
     name: 'High',
-    blurb: 'Sharp lamp shadows. Full PBR cloth.',
-    shadows: true, shadowBulbs: 3, sideShadows: false, shadowMapSize: 2048, softShadows: true,
-    texMax: 4096, normalMap: true, roughnessMap: true, anisotropy: 8,
-    ballTex: 1024, maxPixelRatio: 2,
+    blurb: 'All three lamps cast. Full PBR cloth.',
+    shadows: true, shadowBulbs: 3, sideLights: true, sideShadows: false,
+    texMax: 4096, normalMap: true, ballTex: 1024, ballSegs: 64,
   },
   {
     name: 'Ultra',
-    blurb: 'Adds the rail shadows from the side lights.',
-    shadows: true, shadowBulbs: 3, sideShadows: true, shadowMapSize: 2048, softShadows: true,
-    texMax: 4096, normalMap: true, roughnessMap: true, anisotropy: 16,
-    ballTex: 1024, maxPixelRatio: 2,
+    blurb: 'Side lights cast the rail shadows too.',
+    shadows: true, shadowBulbs: 3, sideLights: true, sideShadows: true,
+    texMax: 4096, normalMap: true, ballTex: 1024, ballSegs: 64,
   },
 ];
 
 // High, not Ultra. Ultra is what the table used to render unconditionally, and
-// the only thing it adds is four more shadow maps for a band along the cushions
-// that reads from the overhead view — a real touch, but a 1.26x frame time and
-// more than double the shadow memory for it. It is one notch away for anyone
-// who wants it back.
+// the only thing it adds is the four side lights' shadows — measured at +5.3 ms,
+// which is more than the other four dials put together and is what drops a
+// full-screen retina window under 60 fps. What it buys is the soft band the rails
+// drop onto the cloth, which mostly reads from the overhead view. One notch away
+// for anyone who wants it back.
 export const DEFAULT_QUALITY = 3;
 
 const KEY = 'poolSettings';
-const DEFAULTS = { reverseAim: false, quality: DEFAULT_QUALITY };
+const DEFAULTS = { reverseAim: false, showFps: false, quality: DEFAULT_QUALITY };
 
 const clampQuality = (q) => Math.max(0, Math.min(QUALITY_LEVELS.length - 1, q | 0));
 
@@ -102,6 +140,7 @@ function load() {
     if (!raw) return { ...DEFAULTS };
     return {
       reverseAim: !!raw.reverseAim,
+      showFps: !!raw.showFps,
       quality: Number.isFinite(raw.quality) ? clampQuality(raw.quality) : DEFAULT_QUALITY,
     };
   } catch { return { ...DEFAULTS }; }   // private mode / corrupt entry
@@ -118,8 +157,21 @@ function save() {
 // isReverseAim is polled per pointer move rather than pushed, so the checkbox
 // needs no wiring beyond setReverseAim.
 export const isReverseAim = () => current.reverseAim;
+export const isShowFps = () => current.showFps;
 export const getQuality = () => current.quality;
-export const qualityLevel = () => QUALITY_LEVELS[current.quality];
+export const qualityLevel = () => override || QUALITY_LEVELS[current.quality];
+
+// Benchmark hook (window.__gfxSet). Pushes an arbitrary set of level fields
+// through the exact path the slider uses, WITHOUT storing it — which is what
+// makes a one-feature-at-a-time ablation possible. It has to live here rather
+// than in the bench script because the subscribers read qualityLevel() back out
+// for themselves (the texture builders in particular), so overriding the getter
+// is the only way every one of them sees the same override. Pass null to clear.
+let override = null;
+export function setQualityOverride(partial) {
+  override = partial ? { ...QUALITY_LEVELS[current.quality], ...partial } : null;
+  for (const fn of listeners) fn(qualityLevel());
+}
 
 // ---- Writes -------------------------------------------------------------------
 const listeners = new Set();
@@ -142,5 +194,10 @@ export function setQuality(q) {
 
 export function setReverseAim(on) {
   current.reverseAim = !!on;
+  save();
+}
+
+export function setShowFps(on) {
+  current.showFps = !!on;
   save();
 }

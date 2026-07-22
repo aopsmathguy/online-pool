@@ -67,7 +67,8 @@ src/                  Game code. Everything here except main.js and the *.view/
   sim.js              RoomSim: one authoritative simulation per room
   game.js             Generic two-player match controller (ruleset-agnostic)
   ai.js               Computer opponent (ghost-ball aiming, shot selection)
-  scene.js            Three renderer/scene/camera/lights
+  scene.js            Three renderer/scene/camera/lights + the quality presets
+  settings.js         Player options (reverse aim, graphics quality) — see §11
   cue.js              Cue stick mesh + orbit/top cameras + aim state (yaw/pitch/spin)
   input.js            Pointer-lock mouse/keyboard bindings
   hud.js              Sidebar HUD renderer (from gameState packets)
@@ -79,9 +80,17 @@ src/                  Game code. Everything here except main.js and the *.view/
     nineball.js       9-ball rules
     util.js           shuffle()
 
+test/
+  *.test.js           Pure-logic suites, no browser      (npm test)
+  browser/            Real Chrome, driven over CDP       (npm run test:browser)
+  perf/               Frame-time benchmarks, real GPU    (npm run perf:*) — §11
+
 lib/                  Vendored: three.module.js, ammo (browser wasm + node cjs),
                       schemapack.js, socketUtility.js, buffer shim
 ```
+
+> The `src/` tree above predates the `client/` `server/` `shared/` split and
+> lists flat paths; the file names are right, the directories are not.
 
 ---
 
@@ -449,8 +458,13 @@ game finishes.
   turn it drives cue.js from the streamed `opponentAim` and switches to the overhead
   camera. Ball-in-hand moves are sent as deltas scaled by `PLACE_SCALE` and echoed
   back via `placing`.
-- **scene.js** — renderer, camera, three shadow-casting directional lights; resizes
-  with the canvas.
+- **scene.js** — renderer, both cameras, and the light rig: three overhead spot
+  lamps down the long axis plus four grazing directional fills, over a hemisphere
+  and an ambient. Resizes with the canvas, and owns everything the quality preset
+  does to the renderer and the lights (`applyQuality`) — see §11.
+- **settings.js** — the two player options (reverse aim, graphics quality),
+  persisted in `localStorage` and pushed live to the three modules holding GPU
+  resources (`scene.js`, `geometry.js`, `balls.view.js`). See §11.
 - **cue.js** — all aim state (yaw/pitch/strike/pullback) plus the stick mesh and both
   cameras. The orbit camera anchors to the cue ball's position at aim time and offsets
   its sightline to stay above/beside the stick even with english or an elevated cue;
@@ -496,7 +510,121 @@ game finishes.
 
 ---
 
-## 11. Common extension points
+## 11. Graphics quality & performance
+
+Two player options live in the ≡ menu (`src/client/settings.js`): **reverse aim**
+and a five-notch **graphics quality** slider. Both persist per-device in
+`localStorage` and apply live — no reload, no new game, safe to change mid-replay.
+
+### The ladder
+
+Measured on an M5 through headless Chrome (ANGLE/Metal), 1400x900 CSS at
+devicePixelRatio 3 — a 4200x2700 backing store, which is the retina case the
+presets exist for. Vsync off, both sweep directions, better median kept.
+
+| # | Preset  | Frame  | fps | Side lights lit | Side lights cast | Lamps casting |
+|---|---------|--------|-----|-----------------|------------------|---------------|
+| 0 | Minimum |  3.3ms | 303 | –               | –                | 0             |
+| 1 | Low     |  5.4ms | 185 | –               | –                | 1             |
+| 2 | Medium  |  8.0ms | 125 | yes             | –                | 1             |
+| 3 | High ←default | 11.9ms | 84 | yes        | –                | 3             |
+| 4 | Ultra   | 17.4ms |  57 | yes             | yes              | 3             |
+
+Ultra is what the table rendered unconditionally before the slider existed. The
+default is High because Ultra's side-light shadows alone cost ~5.3 ms and are
+what drop a full-screen retina window under 60 fps.
+
+### What actually costs anything
+
+From `npm run perf:ablate` — each feature toggled off-then-on back to back,
+median of 3 paired differences, in two different base scenes:
+
+| feature | lean scene | loaded scene |
+|---|---|---|
+| side lights **cast** | +6.20 ms | +5.30 ms |
+| shadows at all (first lamp) | +1.90 ms | n/a\* |
+| lamps casting 1 → 3 | +1.80 ms | +0.60 ms |
+| side lights **lit** | +1.40 ms | +0.80 ms |
+| *— noise floor ≈0.5 ms —* | | |
+| normal map | +0.20 | +0.60 |
+| roughness map | +0.20 | +0.20 |
+| ball mesh 24 → 64 segs | +0.10 | +0.40 |
+| soft PCF vs hard filter | 0.00 | −1.00 |
+| shadow map 512 → 2048 | 0.00 | −0.20 |
+| anisotropy 1 → 16 | 0.00 | +0.20 |
+| ball texture 256 → 1024 | 0.00 | +0.20 |
+| scanned textures 512 → 4K | −0.20 | −1.60 |
+
+\* in the loaded scene the side lights already cast, so switching shadows off
+kills all five maps at once (+8.6 ms) instead of isolating the one lamp.
+
+**The entire budget is shadows and light count.** Nothing else clears the noise
+floor, which is why the ladder moves exactly four things. Two consequences worth
+keeping in mind:
+
+- **Every light shades every fragment, cast or not.** A lit-but-not-casting light
+  still runs a full diffuse + GGX specular evaluation per pixel. Unlighting the
+  four side fills takes the rig from 9 lights to 5. What you *see* go away is one
+  specular highlight per ball — seven dots become three — plus the lift on the
+  cabinet's outward faces, which falls back on the ambient.
+- **Shadow cost is per-pixel, so it grows with resolution.** The side lights'
+  shadows cost 1.26x at dpr 1 but 1.6x at dpr 3. Shadow-shaped things get *more*
+  expensive on exactly the displays most likely to need help.
+
+### What is pinned, and why
+
+The soft PCF filter, 2048 shadow maps, anisotropy 16, and the roughness map are
+**not dials** — all measured free, so degrading them would cost image quality and
+buy zero milliseconds. An earlier cut of these presets dialled all four; that is
+the worst trade available and the ablation exists to prevent it recurring.
+
+Three settings stay tiered despite being free in frame time, for reasons that are
+*not* frame time — keep the distinction when retuning:
+
+| setting | real resource | scale |
+|---|---|---|
+| `texMax` | **VRAM** | five scanned maps ≈380 MB decoded+mipmapped at 4K, ≈28 MB at 1K. An OOM on a phone, not a slow frame. |
+| `normalMap` | **download** | `felt/normal.png` is 11 MB; dropping the slot is the only lever here that avoids a fetch at all. |
+| `ballSegs` | vertex throughput | free on desktop (+0.4 ms), but 16 spheres × 7 shadow passes may not be on weak mobile. |
+
+`texMax` does **not** save download — files are fetched at full size and shrunk
+after decode, because there is one file per map on disk.
+
+### Resolution is deliberately not a dial
+
+It is the single largest lever available: an earlier cut capped pixel ratio per
+level and that cap alone outweighed every other setting combined (Medium ran
+1.0 ms against High's 6.0 on a dpr-3 display, almost all of it 1.5x pixels vs
+2x). Every preset now renders at the display's full `devicePixelRatio`
+(`scene.js` `fitCanvas`, and `hudCanvas.js` matches it). Resolution buys
+sharpness in everything at once and is what the eye reads first; the slider
+spends its budget elsewhere. A trade you can look at and accept is fine, a soft
+image is not.
+
+### Re-running the measurements
+
+```bash
+npm run perf:ablate     # per-feature marginal cost  (~20 min)
+npm run perf:presets    # is the ladder well spaced? (~8 min)
+```
+
+Both need real Chrome (`CHROME=` to override the path) and drive the actual
+client via `window.__gfxSet`, which pushes an arbitrary set of preset fields
+through the same path the slider uses. Two methodology traps, both of which
+produced confidently wrong numbers before being fixed — see the header comments
+in `test/perf/ablate.mjs`:
+
+1. **Measure in pairs.** One baseline compared against many features lets thermal
+   drift land on the features as fake cost; it reported anisotropy at 3.2 ms.
+2. **Use a base where the feature can act.** Adding "soft shadows" onto a base
+   with renderer shadows off changes nothing. Those rows came back *negative*,
+   which is the tell that you are measuring noise.
+
+Do not run anything else GPU-heavy alongside these.
+
+---
+
+## 12. Common extension points
 
 | Want to… | Touch |
 |---|---|

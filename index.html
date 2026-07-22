@@ -112,6 +112,10 @@
                 <input id="reverseAim" type="checkbox" />
                 <span>Reverse aim</span>
               </label>
+              <label class="optCheck" title="Frame rate in the top-right corner. Green is smooth, amber is dropping frames, red is struggling — turn the graphics slider down.">
+                <input id="showFps" type="checkbox" />
+                <span>Show FPS</span>
+              </label>
               <div class="optField">
                 <div class="optLabel">Graphics <b id="qualityName">High</b></div>
                 <!-- Quantized: 5 presets, step 1, notched by the datalist. -->
@@ -150,6 +154,11 @@
           </div>
         </div>
       </div>
+
+      <!-- Frame-rate readout (Options > Show FPS). Top-right is the only corner
+           with nothing in it: the menu is top-left, the names top-middle, and
+           both bottom corners carry the view/zoom clusters. -->
+      <div id="fpsMeter" class="fpsMeter hidden"></div>
 
       <!-- Top-middle: player names (current turn is bold + underlined) + status -->
       <div id="players" class="players"></div>

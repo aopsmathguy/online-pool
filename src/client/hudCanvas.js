@@ -20,7 +20,10 @@ export function initHud(canvasEl) {
 function resize() {
   if (!cv) return;
   const r = cv.getBoundingClientRect();
-  dpr = Math.min(2, window.devicePixelRatio || 1);
+  // Full device ratio, uncapped, matching the 3D stage (see scene.js fitCanvas):
+  // the HUD is nothing but thin strokes and small type, which is exactly what a
+  // capped backing store softens first.
+  dpr = window.devicePixelRatio || 1;
   cv.width = Math.max(1, Math.round(r.width * dpr));
   cv.height = Math.max(1, Math.round(r.height * dpr));
 }

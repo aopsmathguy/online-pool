@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node server/index.js",
     "test": "node --test test/*.test.js",
-    "test:browser": "node --test --test-concurrency=1 test/browser/"
+    "test:browser": "node --test --test-concurrency=1 test/browser/",
+    "perf:ablate": "node test/perf/ablate.mjs",
+    "perf:presets": "node test/perf/presets.mjs"
   },
   "engines": {
     "node": ">=20"

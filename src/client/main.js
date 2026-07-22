@@ -23,6 +23,7 @@ import {
 import { bindInput } from './input.js';
 import {
   QUALITY_LEVELS, getQuality, setQuality, isReverseAim, setReverseAim,
+  isShowFps, setShowFps, setQualityOverride,
 } from './settings.js';
 import {
   buildRack, syncRack, setCuePosition,
@@ -289,6 +290,49 @@ $('optionsToggle').addEventListener('click', () => {
 });
 $('reverseAim').checked = isReverseAim();
 $('reverseAim').addEventListener('change', (e) => setReverseAim(e.target.checked));
+
+// ---- FPS meter ----------------------------------------------------------------
+// Averaged over a window rather than shown per frame: 1/dt off a single frame
+// swings by tens of fps on ordinary GC and reads as noise, and rewriting the DOM
+// every frame to display it would itself cost frames.
+//
+// The COUNTING runs whether or not the meter is shown — two adds and a compare,
+// cheaper than the branch that would skip it — so switching it on shows a true
+// number within one window rather than a garbage first reading. tickFps is called
+// from the top of the render loop, ahead of its early returns, so the rate is the
+// real one even sitting in the menu.
+//
+// Declared HERE, above the wiring below that calls showFpsMeter during module
+// evaluation. Down beside the render loop it would still be in its temporal dead
+// zone at that point and throw.
+const fpsMeter = $('fpsMeter');
+const FPS_WINDOW = 500;              // ms averaged per update
+const FPS_GOOD = 55, FPS_OK = 30;    // green / amber / red
+let fpsFrames = 0, fpsSince = 0, fpsShown = -1;
+function tickFps(now) {
+  if (!fpsSince) { fpsSince = now; return; }
+  fpsFrames++;
+  const dt = now - fpsSince;
+  if (dt < FPS_WINDOW) return;
+  const fps = Math.round((fpsFrames * 1000) / dt);
+  fpsFrames = 0; fpsSince = now;
+  if (!isShowFps() || fps === fpsShown) return;   // nothing to redraw
+  fpsShown = fps;
+  fpsMeter.textContent = fps;
+  fpsMeter.className = `fpsMeter ${fps >= FPS_GOOD ? 'good' : fps >= FPS_OK ? 'ok' : 'bad'}`;
+}
+// Hidden by class rather than by stopping the sampling, so the meter shows a real
+// rate the instant it comes back.
+function showFpsMeter(on) {
+  fpsMeter.classList.toggle('hidden', !on);
+  if (!on) fpsShown = -1;   // force a repaint of the value when it returns
+}
+$('showFps').checked = isShowFps();
+showFpsMeter(isShowFps());
+$('showFps').addEventListener('change', (e) => {
+  setShowFps(e.target.checked);
+  showFpsMeter(e.target.checked);
+});
 
 const qualitySlider = $('qualitySlider');
 function showQuality(i) {
@@ -720,6 +764,7 @@ function pocketedNow(baseline) {
 // only in where the playhead is, so the loop asks that and nothing else.
 function loop(now) {
   requestAnimationFrame(loop);
+  tickFps(now);            // before every early return, so the rate is the real one
   if (!sceneReady) return;
   if (input) input.tick();
   easePlacement();       // glide the cue ball toward the streamed ball-in-hand spot
@@ -820,6 +865,7 @@ window.__replay = () => {
 };
 window.__timeline = () => timeline.state();
 window.__gfx = graphicsDebug;   // debug: what the graphics preset did to the renderer
+window.__gfxSet = setQualityOverride;   // bench: force one preset field at a time
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');

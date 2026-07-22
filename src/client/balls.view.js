@@ -61,16 +61,26 @@ function makeBallTexture({ style, color = "#ffffff", number = null }) {
   ctx.drawImage(c0, 0, 0, size, size, 0, -pad, size, size * sY);
 
   const tex = new THREE.CanvasTexture(c);
-  tex.anisotropy = q.anisotropy; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 16; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
   return tex;
 }
 
 // Geometry and textures are shared across every ball and live for the whole
 // session: syncRack rebuilds meshes after most shots, and at this tessellation
-// /texture size re-allocating per mesh would churn megabytes each time. Nothing
-// below is ever disposed — only the per-mesh material is (see removeBallView).
-const BALL_GEO = new THREE.SphereGeometry(R, 64, 48);
+// /texture size re-allocating per mesh would churn megabytes each time. Only the
+// per-mesh material is disposed per ball (see removeBallView); the shared
+// geometry is replaced wholesale when the preset changes its tessellation.
+//
+// The ball sphere is the single biggest source of geometry in the scene — 16 of
+// them at `ballSegs` x 3/4 that, and every one is a shadow caster, so each is
+// re-submitted once per shadow map on top of the main pass. That multiplier is
+// why it is worth a dial at all.
+let BALL_GEO = makeBallGeo();
+function makeBallGeo() {
+  const n = qualityLevel().ballSegs;
+  return new THREE.SphereGeometry(R, n, Math.round(n * 0.75));
+}
 const MARK_GEO = new THREE.SphereGeometry(R * 0.18, 24, 16);
 const texCache = new Map();
 function ballTexture({ style, color, number }) {
@@ -98,18 +108,29 @@ function makeBallMesh({ style, color, number = null }) {
 // --- id-keyed registry ------------------------------------------------------
 const views = new Map();   // id -> { mesh, number, style, color }
 
-// Quality changed: the cached textures are the wrong size now. Redraw them at
-// the new one and re-point every live ball's material at its replacement — the
-// meshes themselves are untouched, so a rebuild mid-shot can't disturb a
-// replay's poses. `color` is carried in the view record purely so a ball can be
-// re-textured here without going back to BALL_COLORS for it.
+// Quality changed: the cached textures and the shared sphere are both the wrong
+// size now. Redraw/rebuild them and re-point every live ball at the replacements.
+//
+// Safe to do mid-shot, which matters because the slider is reachable while a
+// replay is playing: position and quaternion live on the MESH, and only its
+// `geometry` and `material` fields are reassigned here, so a ball keeps the exact
+// pose the playhead put it in. Nothing is re-racked and no frame is re-applied.
+//
+// `color` is carried in the view record purely so a ball can be re-textured here
+// without going back to BALL_COLORS for it.
 onQualityChange(() => {
   for (const tex of texCache.values()) tex.dispose();
   texCache.clear();
+  const oldGeo = BALL_GEO;
+  BALL_GEO = makeBallGeo();
   for (const v of views.values()) {
     v.mesh.material.map = ballTexture(v);
     v.mesh.material.needsUpdate = true;
+    v.mesh.geometry = BALL_GEO;
   }
+  // Only safe AFTER every mesh has been re-pointed — disposing a geometry still
+  // referenced by a drawn mesh drops its GPU buffers out from under the draw.
+  oldGeo.dispose();
 });
 
 export function buildRack(layout) {

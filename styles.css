@@ -85,6 +85,23 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 .helpBody p { margin:0 0 8px; }
 .helpPanel.collapsed .helpBody { display:none; }
 
+/* Frame-rate readout, top-right (Options > Show FPS).
+   Tabular figures so the number doesn't jitter its own width as it changes, and
+   pointer-events:none so a meter parked over the table never eats an aim drag. */
+.fpsMeter { position:absolute; top:12px; right:12px; z-index:6;
+  font-size:11px; font-weight:700; line-height:1;
+  font-variant-numeric:tabular-nums; font-family:ui-monospace,Menlo,monospace;
+  padding:4px 6px; border-radius:6px;
+  background:rgba(6,10,25,0.72); border:1px solid rgba(255,255,255,0.10);
+  pointer-events:none; }
+.fpsMeter.hidden { display:none; }
+/* Three bands, not a gradient: at 11px in a corner you want to read
+   "fine / marginal / bad" at a glance, and a continuous hue makes every value
+   look like every other one. */
+.fpsMeter.good { color:#5ee08a; }
+.fpsMeter.ok   { color:#ffd27d; }
+.fpsMeter.bad  { color:#ff8a8a; }
+
 /* ===== Top-middle player names + status ===== */
 .players { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:5;
   display:flex; align-items:center; gap:14px; font-size:17px; color:#e7eef7;

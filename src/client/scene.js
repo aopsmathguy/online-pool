@@ -10,7 +10,6 @@ let renderer, scene, camera, perspCamera, orthoCamera;
 // initScene rather than dropped into the graph and forgotten.
 const bulbs = [];
 const sideLights = [];
-let DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
 const canvas = document.getElementById('stage');
 
 // Full half-extents of the table INCLUDING the pockets + rail lip, plus a little
@@ -46,6 +45,11 @@ export function initScene() {
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
+  // PCF with a soft kernel, at every preset. The default (PCFShadowMap)
+  // point-samples the depth map, so an edge lands on texel boundaries and reads
+  // as stair-stepped pixels. It is also not a dial: soft vs hard measured 0.0 ms
+  // lean and -1.0 ms loaded — free — so there is nothing to gain by degrading it.
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   // Pixel ratio, shadow-map enable/type/size and which lights cast are all set
   // from the graphics preset at the bottom of initScene (applyQuality), so
   // there is exactly one place that decides them — the startup path and a
@@ -87,7 +91,7 @@ export function initScene() {
   applyQuality(qualityLevel());
   window.addEventListener('resize', fitCanvas);
   fitCanvas();
-  return { scene, camera, renderer, canvas, DPR };
+  return { scene, camera, renderer, canvas };
 }
 
 // ---- Graphics presets ---------------------------------------------------------
@@ -96,43 +100,53 @@ export function initScene() {
 function applyQuality(q) {
   if (!renderer) return;   // before initScene — initScene calls this itself
 
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.maxPixelRatio));
+  // Resolution is deliberately NOT one of the dials — see fitCanvas.
 
-  // Neither of these is watched by the renderer: a material's compiled program
-  // bakes in USE_SHADOWMAP and the filter kind, and three only recompiles when
-  // the material's own version changes. So flipping either without marking the
-  // materials dirty leaves every surface running last preset's shader — shadows
-  // that are switched off keep drawing, and switched on never appear.
-  const wantType = q.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
-  const recompile = renderer.shadowMap.enabled !== q.shadows || renderer.shadowMap.type !== wantType;
+  // shadowMap.enabled is not watched by the renderer: a material's compiled
+  // program bakes in USE_SHADOWMAP, and three only recompiles when the
+  // material's own version changes. So flipping it without marking the materials
+  // dirty leaves every surface running the last preset's shader — shadows that
+  // were switched off keep drawing, and switched on never appear.
+  const recompile = renderer.shadowMap.enabled !== q.shadows;
   renderer.shadowMap.enabled = q.shadows;
-  renderer.shadowMap.type = wantType;
   if (recompile) markMaterialsDirty();
 
-  bulbs.forEach((b, i) => configureShadow(b, i < q.shadowBulbs, q.shadowMapSize));
-  // The side lights' maps stay at 1024 whatever the preset: they only exist at
-  // Ultra, and their job is a soft band rather than a crisp edge, so the size
-  // dial does nothing for them that turning them off doesn't do better.
-  for (const L of sideLights) configureShadow(L, q.sideShadows, 1024);
+  bulbs.forEach((b, i) => configureShadow(b, i < q.shadowBulbs));
+  // Two separate things for the side lights, and the split is the most valuable
+  // one the slider has: whether they CAST (a shadow map each, plus a per-pixel
+  // lookup on every surface — measured at 5.3 ms, more than every other dial
+  // combined) and whether they are LIT AT ALL (0.8 ms). An unlit light leaves
+  // the lighting state entirely, so it stops costing a diffuse + GGX specular
+  // evaluation on every fragment. What you see go away is one highlight per
+  // ball, seven specular dots dropping to three.
+  for (const L of sideLights) {
+    L.visible = q.sideLights;
+    configureShadow(L, q.sideLights && q.sideShadows);
+  }
 
   // Shadow maps are only redrawn when the renderer thinks something moved. A
   // preset change moves nothing, so without this the balls keep their old
-  // shadows (at the old resolution) until the next shot.
+  // shadows until the next shot.
   renderer.shadowMap.needsUpdate = true;
 }
 
-// Whether a light casts, and at what map size. Setting mapSize alone does
-// nothing once the render target exists — WebGLShadowMap allocates at the size
-// it first saw and then reuses that target — so the old one has to be released
-// AND nulled to make it allocate again. A light that has stopped casting drops
-// its map for the same reason in reverse: the memory is the whole point of
-// turning it off, and it reallocates by itself if the preset comes back up.
-function configureShadow(light, cast, size) {
+// Pinned, not dialled: 512 -> 2048 measured 0.0 ms on a lean scene and -0.2 on a
+// loaded one, i.e. free either way. Only the NUMBER of maps costs anything, and
+// that is what the presets vary. Memory scales with the count too (one 2048 depth
+// map is ~7 MB), so there is nothing left for a size dial to buy.
+const SHADOW_MAP_SIZE = 2048;
+
+// Whether a light casts. Setting mapSize alone does nothing once the render
+// target exists — WebGLShadowMap allocates at the size it first saw and then
+// reuses that target — so the old one has to be released AND nulled to make it
+// allocate again. A light that has stopped casting drops its map for the same
+// reason in reverse: the memory is the whole point of turning it off, and it
+// reallocates by itself if the preset comes back up.
+function configureShadow(light, cast) {
   const S = light.shadow;
   light.castShadow = cast;
-  const stale = !cast || S.mapSize.width !== size;
-  if (stale && S.map) { S.map.dispose(); S.map = null; }
-  if (cast) S.mapSize.set(size, size);
+  if (!cast && S.map) { S.map.dispose(); S.map = null; }
+  if (cast) S.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
 }
 
 function markMaterialsDirty() {
@@ -165,10 +179,17 @@ export function graphicsDebug() {
   });
   return {
     pixelRatio: renderer.getPixelRatio(),
+    drawCalls: renderer.info.render.calls,
+    // Per FRAME, so it already counts each shadow map's extra pass over the
+    // casters — which is why ball tessellation is worth more than it looks.
+    triangles: renderer.info.render.triangles,
     shadows: renderer.shadowMap.enabled,
-    softShadows: renderer.shadowMap.type === THREE.PCFSoftShadowMap,
+    softShadows: renderer.shadowMap.type === THREE.PCFSoftShadowMap,   // pinned true
     bulbShadows: casters.length,
     sideShadows: sideLights.filter(l => l.castShadow).length,
+    // Lights actually shading each fragment — the per-pixel cost the shadow
+    // counts above say nothing about.
+    litLights: (() => { let n = 0; scene.traverse(o => { if (o.isLight && o.visible) n++; }); return n; })(),
     bulbMapSize: casters[0]?.shadow.mapSize.width ?? 0,
     // Shadow render targets still allocated — the memory a lower preset is
     // supposed to have handed back.
@@ -282,6 +303,17 @@ export function setCameraMode(mode) {
 
 export function fitCanvas() {
   const r = canvas.getBoundingClientRect();
+  // Always the display's true pixel ratio, at every quality preset — the table
+  // is drawn in thin bright lines (the cushion nose, the sight dots, the cue) and
+  // every one of them frays the moment it is rasterised below native and scaled
+  // back up. Resolution is the one cost that buys sharpness EVERYWHERE rather
+  // than in one effect, so it is not something the quality slider trades away;
+  // the slider spends its budget on shadows and texture memory instead.
+  //
+  // Set here rather than once at startup because it is not a constant: dragging
+  // the window between a retina and a non-retina monitor changes it, and that
+  // fires a resize, so this is the one place that always sees the change.
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
   renderer.setSize(r.width, r.height, false);
   const aspect = (r.width || 1) / (r.height || 1);
   if (perspCamera) {
