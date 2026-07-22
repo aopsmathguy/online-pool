@@ -4,7 +4,7 @@
 // moved to geometry.physics.js.
 import * as THREE from "/lib/three.module.js";
 import { table_parts, rail_solid, RAIL_FACES, cabinet_section, table_top_outline, pocket_positions } from '../shared/table.js';
-import { pocketWireY, cabinetDeckThickness, inset, cabinetRTop } from '../shared/constants.js';
+import { pocketWireY, inset, cabinetRTop } from '../shared/constants.js';
 export { rail_pts, felt_pts, pocket_positions, table_parts } from '../shared/table.js';
 
 export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
@@ -237,6 +237,11 @@ function makeWoodTextures() {
       return { ...out };
 }
 
+// A horizontal surface from a closed polyline, optionally with holes punched in
+// it. `thickness` 0 gives a single flat FACE lying at y — no sides, no underside,
+// just the one sheet of triangles; any positive thickness extrudes a slab whose
+// MIDPLANE is at y. Both are double-sided, so a bare face is still visible from
+// underneath.
 export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       if (!points || points.length < 3) throw new Error("Need ≥3 points");
       const {
@@ -268,9 +273,14 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
         shape.holes.push(h);
       }
 
-      const extrudeSettings = { depth: thickness, bevelEnabled: false, curveSegments: 12 };
-      const geom = new THREE.ExtrudeGeometry(shape, extrudeSettings);
-      geom.translate(0, 0, y-thickness / 2);
+      // ShapeGeometry lays the face in the local XY plane at z = 0 and takes its
+      // UVs straight from the shape's own coordinates — metres, same as the
+      // extruded top face and the skirt, so the wood tiles across all of them at
+      // one scale.
+      const geom = thickness > 0
+        ? new THREE.ExtrudeGeometry(shape, { depth: thickness, bevelEnabled: false, curveSegments: 12 })
+        : new THREE.ShapeGeometry(shape, 12);
+      geom.translate(0, 0, y - thickness / 2);
       geom.computeVertexNormals();
       geom.computeBoundingBox();
       geom.computeBoundingSphere();
@@ -297,8 +307,8 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       return mesh;
     }
 
-// The wooden cabinet: a tapered skirt around the whole table, plus the flat
-// deck that closes it off at the top.
+// The wooden cabinet: a tapered skirt around the whole table, capped by a flat
+// deck at the top and a flat floor at the bottom.
 //
 // The skirt is one ruled surface. Both sections come from cabinet_section() with
 // the same segment count, so lofting them is an index-for-index quad strip — and
@@ -312,16 +322,21 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
 // no holes cut for them — the wood does overhang the back of each cup, which is
 // how a real pocket liner sits.
 //
-// Vertically its face is flush with the rails, which is also the wire's axis, and
-// it is one rod radius thick (see cabinetYTop) — so it cuts the rod through the
-// middle, leaving the lower half buried and the upper half standing proud.
+// The floor closes the bottom off the same way, minus the cut-out: the skirt's
+// own bottom ring filled solid, so the underside reads as a closed box.
+//
+// Both caps are single FACES, not slabs. Nothing ever sees an edge of either —
+// the deck's outer edge is the skirt's top ring and the floor's is its bottom
+// ring, so a thickness would only ever be hidden behind the skirt. The deck's
+// plane is flush with the rails, which is also the wire's axis, so it cuts the
+// rod through the middle, leaving the lower half buried and the upper half
+// standing proud.
 export function makeTableCabinet(tableW, tableH, opts = {}) {
       const {
         rTop, rBottom, yTop, yBottom,
         color = 0x5c3a21,
         roughness = 0.62,
         segments = 24,
-        deckThickness = cabinetDeckThickness,
       } = opts;
 
       const group = new THREE.Group();
@@ -373,19 +388,15 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
       skirtMesh.receiveShadow = true;
       group.add(skirtMesh);
 
-      // --- deck ----------------------------------------------------------
-      // Outer edge is the skirt's own top ring, so the two meet exactly at yTop.
-      const deck = makePlanarMeshFromPolyline(
-        top,
-        deckThickness,
-        yTop - deckThickness / 2,
-        {
-          color, roughness, metalness: 0.0, wood: true,
-          holes: [table_top_outline(tableW, tableH)],
-          castShadow: true, receiveShadow: true,
-        },
-      );
-      group.add(deck);
+      // --- deck and floor -------------------------------------------------
+      // Each cap's outline IS the skirt ring at that height, so the three meet
+      // exactly with no seam to close.
+      const face = { color, roughness, metalness: 0.0, wood: true, castShadow: true, receiveShadow: true };
+      group.add(makePlanarMeshFromPolyline(top, 0, yTop, {
+        ...face,
+        holes: [table_top_outline(tableW, tableH)],
+      }));
+      group.add(makePlanarMeshFromPolyline(bot, 0, yBottom, face));
 
       return group;
 }
@@ -553,8 +564,8 @@ export function makeCylindricalCupMesh(radius, height, opts = {}) {
   // Raised back. The rim sits below the felt, so from inside the table you look
   // straight over it, through the mouth and on into the cabinet — the wire and
   // the cup read as separated by a gap of nothing. Where the rim is OUTSIDE the
-  // table's top outline it has the wooden deck above it, so the wall can run up
-  // to the deck's underside and close that line of sight. Where it is inside the
+  // table's top outline it has the wire and the deck above it, so the wall can
+  // run up to `raiseTo` and close that line of sight. Where it is inside the
   // outline it must stay low: that is the mouth the ball drops through.
   //
   // The run ends where the cup circle crosses the outline, which is on the rail's

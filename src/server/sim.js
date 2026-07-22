@@ -15,7 +15,7 @@ import {
 import {
   setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
   CG_BALL, CG_SUNK,
-  MASK_BALL_NORMAL, MASK_BALL_NEAR_POCKET, MASK_SUNK,
+  MASK_BALL_NORMAL, MASK_BALL_OFF_FELT, MASK_SUNK,
 } from './physics.js';
 import { buildTableWorld, railPoints } from './table.world.js';
 import { computeBounds, resolvePlacement, HEAD_STRING_X } from './placement.js';
@@ -26,7 +26,7 @@ import { resetRack, setBallPosition, spotBall } from './balls.logic.js';
 import { createGame } from '../shared/game.js';
 import { densify } from '../shared/clearance.js';
 import {
-  POCKET_Y_THRESHOLD, isInsideAnyPocket, isNearPocket,
+  POCKET_Y_THRESHOLD, isInsideAnyPocket, isOffFelt,
 } from '../shared/pockets.js';
 import { PH_AIMING, PH_SHOOTING, PH_PLACING, PH_OVER } from '../shared/net/packets.js';
 
@@ -225,15 +225,22 @@ export class RoomSim {
       // to REPLAY_FRAME_DT, so halving the keyframe rate to save bandwidth
       // would also have halved pocketing accuracy.
       //
-      // updatePocketMasks is the one that actually mattered: it swaps a ball
-      // near a hole onto the triangulated felt so it CAN tip in, and running it
-      // late leaves a fast ball rolling across the pocket mouth on the flat
-      // plane, as if the hole were not there. At 8 m/s a keyframe is 128 mm of
-      // travel against a 200 mm mouth. checkPocketed only observes a ball that
-      // is already below the lip and falling, which spans many substeps — its
-      // cadence measurably changed nothing, but it belongs here for the same
-      // reason.
-      this.updatePocketMasks();
+      // updateFeltMasks is the one that actually mattered: it swaps a ball that
+      // has left the felt outline onto the triangulated felt so it CAN tip in,
+      // and running it late leaves a fast ball rolling across the pocket mouth
+      // on the flat plane, as if the hole were not there. At 8 m/s a keyframe is
+      // 128 mm of travel against a 117 mm corner mouth — it can miss the opening
+      // outright. checkPocketed only observes a
+      // ball that is already below the lip and falling, which spans many
+      // substeps — its cadence measurably changed nothing, but it belongs here
+      // for the same reason.
+      //
+      // The threshold now sits exactly ON the outline rather than a radius
+      // outside it, so this sampling rate is the entire margin: a ball is held
+      // up by the plane for at most the one substep in which it crosses out
+      // (32 mm at 8 m/s). That is affordable only at substep cadence. Do not
+      // move this call.
+      this.updateFeltMasks();
       this.checkPocketed();                       // sinks pocketed balls (not removed yet)
       simT += FIXED_DT; frameAcc += FIXED_DT;
       if (frameAcc >= REPLAY_FRAME_DT - 1e-9) {
@@ -333,18 +340,20 @@ export class RoomSim {
     }
   }
 
-  // Near a pocket, swap the ball onto the triangulated felt (real hole) so it can
-  // tip in; elsewhere keep it on the flat plane. Just a collision-filter switch —
-  // the two felt surfaces are coplanar, so nothing pops.
-  updatePocketMasks() {
+  // Once a ball's centre leaves the felt outline, swap it onto the triangulated
+  // felt (real hole) so it can tip in; inside the outline keep it on the flat
+  // plane. Just a collision-filter switch, and a free one: inside the outline
+  // the two surfaces give a sphere the same contact, so the swap happens at the
+  // one point where they start to differ and nothing pops. See isOffFelt.
+  updateFeltMasks() {
     for (const b of this.balls) {
       if (b.pendingSpot) continue;
       const o = b.body.getWorldTransform().getOrigin();
-      const near = isNearPocket(o.x(), o.z());
-      if (near === b.nearPocket) continue;
-      setBodyFilter(this.world, b.body, CG_BALL, near ? MASK_BALL_NEAR_POCKET : MASK_BALL_NORMAL);
-      b.nearPocket = near;
-      if (near) b.body.activate();
+      const off = isOffFelt(o.x(), o.z());
+      if (off === b.offFelt) continue;
+      setBodyFilter(this.world, b.body, CG_BALL, off ? MASK_BALL_OFF_FELT : MASK_BALL_NORMAL);
+      b.offFelt = off;
+      if (off) b.body.activate();
     }
   }
 

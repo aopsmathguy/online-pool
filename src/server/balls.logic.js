@@ -1,6 +1,6 @@
 // src/balls.logic.js — ball physics bodies + rack, with NO Three/rendering.
 // Everything is parameterized by (world, balls) so the server can run many
-// tables at once. A "ball" here is { body, number, style, color, nearPocket }.
+// tables at once. A "ball" here is { body, number, style, color, offFelt }.
 // The client mirrors these as meshes in balls.view.js keyed by the same id/index.
 import { R, m, mu_ball, e_ball, RACK_QUAT } from '../shared/constants.js';
 import {
@@ -45,7 +45,7 @@ export function resetRack(world, balls, layout) {
     body.setSleepingThresholds(0.0002, 0.0002);
     body.setContactProcessingThreshold(0.);
 
-    balls.push({ body, style, color, number, nearPocket: false });
+    balls.push({ body, style, color, number, offFelt: false });
   }
   return balls;
 }
@@ -55,7 +55,7 @@ export function getBallByNumber(balls, n) {
 }
 
 // Teleport a ball to (x, z) on the felt, clearing motion and restoring the
-// normal collision filter (in case it was passing over a pocket). Works for the
+// normal collision filter (in case it was out over a mouth). Works for the
 // cue ball and object balls — used for ball-in-hand and spotting. Rotation is
 // squared back to RACK_QUAT so a spotted ball's number faces up again.
 export function setBallPosition(world, b, x, z, y = R) {
@@ -68,9 +68,9 @@ export function setBallPosition(world, b, x, z, y = R) {
   b.body.setLinearVelocity(tmpVec3);
   b.body.setAngularVelocity(tmpVec3);
   b.body.activate();
-  if (b.nearPocket) {
+  if (b.offFelt) {
     setBodyFilter(world, b.body, CG_BALL, MASK_BALL_NORMAL);
-    b.nearPocket = false;
+    b.offFelt = false;
   }
 }
 

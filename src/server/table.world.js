@@ -25,11 +25,12 @@ export const feltPoints = felt_pts(tableW, tableH);   // felt outline WITH pocke
 export function buildTableWorld() {
   const world = createWorld();
 
-  // Felt is modelled two ways. AWAY from pockets a ball rolls on this flat,
-  // edge-free plane (cheap, snag-free). NEAR a pocket updatePocketMasks swaps
-  // the ball onto the triangulated felt below, which has the real hole, so it
-  // rolls over the lip and tips in. The two are coplanar (y=0), so the swap
-  // never pops the ball.
+  // Felt is modelled two ways. While a ball's centre is ON the felt outline it
+  // rolls on this flat, edge-free plane (cheap, snag-free). Once the centre
+  // leaves the outline updateFeltMasks swaps it onto the triangulated felt
+  // below, which has the real hole, so it pivots over the lip and tips in.
+  // The two are coplanar (y=0) AND — while the centre is inside — give a sphere
+  // the identical contact, so the swap is invisible; see isOffFelt.
   const planeShape = new AmmoLib.btStaticPlaneShape(new AmmoLib.btVector3(0, 1, 0), 0);
   const feltBody = createRigidBody(world, {
     mass: 0, shape: planeShape, pos: { x: 0, y: 0, z: 0 }, quat: { x: 0, y: 0, z: 0, w: 1 },

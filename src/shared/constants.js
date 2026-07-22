@@ -64,19 +64,17 @@ export const rail_cap = inset / 2;
 export const cabinetRBottom = 0.110;
 export const cabinetRTop    = cabinetRBottom + 0.055;
 
-// The deck is the flat ring of wood that closes the cabinet off at the top. Its
-// face sits at pocketWireY, which is the rail top and the wire's axis at once —
-// the two are the same height — so it is flush with the rails and cut through
-// the middle of the rod. One rod RADIUS thick, which lands its underside on the
-// bottom of the rod: the wire ends up half-sunk, lower half buried and upper
-// half standing proud. That underside is also where a pocket's raised back wall
-// stops, so the cabinet builder and the cup read these rather than keep a copy.
-export const cabinetDeckThickness = rodR;
-export const cabinetYTop          = pocketWireY;                         // rail top = wire axis
-export const cabinetDeckUnderY    = cabinetYTop - cabinetDeckThickness;  // = rod bottom
+// The deck is the flat ring of wood that closes the cabinet off at the top — a
+// single face with no thickness, so it has no underside to see. It sits at
+// pocketWireY, which is the rail top and the wire's axis at once — the two are
+// the same height — so it is flush with the rails and passes through the middle
+// of the rod, leaving the wire half-sunk.
+export const cabinetYTop = pocketWireY;   // rail top = wire axis = deck face
 // The underside of the cup's base disc, not the cup floor: stopping at the floor
 // leaves the lower half of that disc showing beneath the wood at the middle
-// pockets, where the section is tangent to the cups and hides nothing.
+// pockets, where the section is tangent to the cups and hides nothing. It is
+// also where the cabinet's bottom face lies, and that face wants to land flush
+// with the cups rather than slice through them.
 export const cabinetYBottom = cupY - cupDepth * 0.5 - cupBase * 0.5;
 
 export const mid_mouth = 0.132;

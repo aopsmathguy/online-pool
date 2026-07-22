@@ -5,16 +5,16 @@
 // Everything derives from pocket_positions() (centres) plus the mouth-width
 // constants, so pocket size/placement lives in exactly one place.
 import { tableW, tableH, corner_mouth, mid_mouth } from './constants.js';
-import { pocket_positions } from './table.js';
+import { pocket_positions, felt_pts, point_in_outline } from './table.js';
 
 // Pocket centre positions [[x, z], ...].
 export const pocketPositions = pocket_positions(tableW, tableH);
 
 // --- Ball-capture geometry (server sim) -------------------------------------
 // A ball is pocketed once it drops below POCKET_Y_THRESHOLD with its centre
-// within CAPTURE_R of a pocket. The DROP itself is physical: near a pocket the
+// within CAPTURE_R of a pocket. The DROP itself is physical: over a mouth the
 // ball rolls on the triangulated felt (which has the real hole) and tips in —
-// see isNearPocket + createFeltMesh.
+// see isOffFelt + createFeltMesh.
 export const POCKET_Y_THRESHOLD = -0.05;
 const CAPTURE_R = 0.10;
 const CAPTURE_R_SQ = CAPTURE_R * CAPTURE_R;
@@ -27,18 +27,24 @@ export function isInsideAnyPocket(x, z) {
   return false;
 }
 
-// True when a ball is close enough to a pocket to swap from the flat felt plane
-// to the triangulated felt mesh (which has the real hole). NEAR_R must comfortably
-// exceed the mouth cutout's reach (~0.13 m at the corners) so the ball is already
-// on the mesh by the time it reaches the opening.
-const NEAR_R = 0.2;
-const NEAR_R_SQ = NEAR_R * NEAR_R;
-export function isNearPocket(x, z) {
-  for (const [px, pz] of pocketPositions) {
-    const dx = x - px, dz = z - pz;
-    if (dx * dx + dz * dz <= NEAR_R_SQ) return true;
-  }
-  return false;
+// True when a ball must be on the triangulated felt mesh rather than the flat
+// felt plane — i.e. when its CENTRE has left the felt outline.
+//
+// That is the exact point where the two surfaces stop agreeing, and it is the
+// whole criterion. A sphere's contact is decided by the closest point on the
+// surface, so while the centre projects INSIDE the outline the nearest point on
+// the mesh is straight down: vertical normal, same depth, indistinguishable from
+// the infinite plane no matter how far the ball overhangs. Once the centre
+// crosses out, the nearest feature becomes the boundary EDGE and the normal
+// tilts — the ball pivots over the lip and falls. Only the mesh can produce
+// that, and only out here.
+//
+// The felt outline runs `inset` PAST the cushion noses, so the only stretch of
+// boundary a ball can actually reach is the pocket-mouth notches. Everywhere
+// else it is buried under the rails.
+const FELT_OUTLINE = felt_pts(tableW, tableH);
+export function isOffFelt(x, z) {
+  return !point_in_outline(x, z, FELT_OUTLINE);
 }
 
 // --- Mouth-endpoint geometry (AI aimer) -------------------------------------

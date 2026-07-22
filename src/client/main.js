@@ -5,7 +5,7 @@ import * as THREE from "/lib/three.module.js";
 import { initScene, render, camera } from './scene.js';
 import {
   tableW, tableH, wireY, rodR, R, cupDepth, cupY, cupR,
-  cabinetRTop, cabinetRBottom, cabinetYTop, cabinetYBottom, cabinetDeckUnderY,
+  cabinetRTop, cabinetRBottom, cabinetYTop, cabinetYBottom,
 } from '../shared/constants.js';
 import { table_top_outline, point_in_outline } from '../shared/table.js';
 import {
@@ -171,14 +171,16 @@ function buildScene() {
   const POCKET_BLACK = 0x141414;   // near-black; true 0 leaves nothing for light to land on
   const PLASTIC = { roughness: 0.35, metalness: 0.0 };
   scene.add(makeTableRails(tableW, tableH, rodR, wireY, { color: POCKET_BLACK, ...PLASTIC }));
-  // Each cup carries its wall up to the deck's underside over the part of its rim
-  // that lies outside the table, so there is no see-through gap under the wire.
+  // Each cup carries its wall up over the part of its rim that lies outside the
+  // table, so there is no see-through gap under the wire. It stops at the BOTTOM
+  // of the wire rod: from there up the rod itself blocks the line of sight, so
+  // any more wall would only be hidden behind it.
   const topOutline = table_top_outline(tableW, tableH);
   for (const [x, z] of pocketPositions) {
     scene.add(makeCylindricalCupMesh(cupR, cupDepth, {
       pos: { x, y: cupY, z },
       color: POCKET_BLACK, ...PLASTIC,
-      raiseTo: cabinetDeckUnderY,
+      raiseTo: wireY - rodR,
       raiseWhere: (px, pz) => !point_in_outline(px, pz, topOutline),
     }));
   }

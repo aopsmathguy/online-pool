@@ -9,7 +9,7 @@ import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
 import { isInsideAnyPocket } from '../shared/pockets.js';
 
 function makeBallTexture({ style, color = "#ffffff", number = null }) {
-  const size = 256;
+  const size = 1024;
   const sY = TEX_V_STRETCH;
   const c0 = document.createElement('canvas'); c0.width = c0.height = size;
   const ctx0 = c0.getContext('2d');
@@ -55,19 +55,32 @@ function makeBallTexture({ style, color = "#ffffff", number = null }) {
   ctx.drawImage(c0, 0, 0, size, size, 0, -pad, size, size * sY);
 
   const tex = new THREE.CanvasTexture(c);
-  tex.anisotropy = 8; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = 16; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
   return tex;
 }
 
+// Geometry and textures are shared across every ball and live for the whole
+// session: syncRack rebuilds meshes after most shots, and at this tessellation
+// /texture size re-allocating per mesh would churn megabytes each time. Nothing
+// below is ever disposed — only the per-mesh material is (see removeBallView).
+const BALL_GEO = new THREE.SphereGeometry(R, 64, 48);
+const MARK_GEO = new THREE.SphereGeometry(R * 0.18, 24, 16);
+const texCache = new Map();
+function ballTexture({ style, color, number }) {
+  const key = `${style}|${color}|${number}`;
+  let tex = texCache.get(key);
+  if (!tex) { tex = makeBallTexture({ style, color, number }); texCache.set(key, tex); }
+  return tex;
+}
+
 function makeBallMesh({ style, color, number = null }) {
-  const geo = new THREE.SphereGeometry(R, 16, 10);
-  const map = makeBallTexture({ style, color, number });
+  const map = ballTexture({ style, color, number });
   const mat = new THREE.MeshStandardMaterial({ map, roughness: 0.05, metalness: 0.0 });
-  const mesh = new THREE.Mesh(geo, mat);
+  const mesh = new THREE.Mesh(BALL_GEO, mat);
   mesh.castShadow = true; mesh.receiveShadow = false;
 
-  const mark = new THREE.Mesh(new THREE.SphereGeometry(R * 0.18, 12, 10),
+  const mark = new THREE.Mesh(MARK_GEO,
     new THREE.MeshBasicMaterial({ color: 0xff2b2b }));
   mark.position.set(R * 0.7, R * 0.2, R * 0.1);
   mesh.add(mark);
@@ -107,13 +120,16 @@ export function snapshotRack() {
   return out;
 }
 
+// Drop a ball mesh. Geometry and texture are shared/cached, so only the
+// per-mesh materials (ball + its spin marker) are ours to release.
+function disposeBallMesh(mesh) {
+  scene.remove(mesh);
+  mesh.material.dispose();
+  for (const child of mesh.children) child.material?.dispose();
+}
+
 export function clearRack() {
-  for (const { mesh } of views.values()) {
-    scene.remove(mesh);
-    mesh.geometry.dispose();
-    if (mesh.material.map) mesh.material.map.dispose();
-    mesh.material.dispose();
-  }
+  for (const { mesh } of views.values()) disposeBallMesh(mesh);
   views.clear();
 }
 
@@ -178,10 +194,7 @@ export function applyBallsFrameLerp(itemsA, itemsB, alpha) {
 export function removeBallView(id) {
   const v = views.get(id);
   if (!v) return;
-  scene.remove(v.mesh);
-  v.mesh.geometry.dispose();
-  if (v.mesh.material.map) v.mesh.material.map.dispose();
-  v.mesh.material.dispose();
+  disposeBallMesh(v.mesh);
   views.delete(id);
 }
 
