@@ -126,6 +126,17 @@ export async function launchPerf({
       return median(await evaluate(`JSON.stringify(window.__ft)`).then(JSON.parse));
     },
     gfx: () => evaluate(`JSON.stringify(window.__gfx())`).then(JSON.parse),
+    /**
+     * PNG of the composited page, as a Buffer.
+     *
+     * Over CDP rather than canvas.toDataURL(): the renderer is built without
+     * preserveDrawingBuffer, so reading the WebGL canvas back outside the frame
+     * that drew it returns a blank image.
+     */
+    async screenshot() {
+      const r = await send('Page.captureScreenshot', { format: 'png' });
+      return Buffer.from(r.result.data, 'base64');
+    },
     errors: () => evaluate(`JSON.stringify(window.__errors)`),
     renderer: () => evaluate(`(() => {
       const gl = document.getElementById('stage').getContext('webgl2');

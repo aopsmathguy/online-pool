@@ -1,7 +1,7 @@
 // src/table.js — pure table geometry (point generators only, no Three / no Ammo).
 // Shared by the server (to build rail/pocket physics) and the client (to build
 // the visual rail/felt meshes), so it must stay free of Three/Ammo imports.
-import { mid_mouth, mid_throat, corner_mouth, corner_throat, inset, wireY, rail_rise, rail_cap } from './constants.js';
+import { mid_mouth, mid_throat, corner_mouth, corner_throat, inset, wireY, rail_rise, rail_cap, rodR } from './constants.js';
 
 // The table boundary is one closed loop that alternates POCKET and RAIL:
 // pocket throat, cushion, pocket throat, cushion, ... six of each. The throats
@@ -67,11 +67,88 @@ export function table_parts(tableW, tableH) {
   // cushion lies exactly on the table's outer edge line (z = ±tableH/2 - inset,
   // x = ±tableW/2 - inset), which is exactly where the cap's outer corner
   // lands. So the wire runs only between those two points — carrying it all the
-  // way to the mouth would double the rail. The trimmed ends coincide with the
-  // cap corners to the last bit, so the throat still reads as one closed curve.
-  const wires = pockets.map(throat => throat.slice(1, -1));
+  // way to the mouth would double the rail.
+  //
+  // Then pushed outward by one rod radius: see offset_wire_outward.
+  const wires = pockets.map(throat =>
+    offset_wire_outward(throat.slice(1, -1), rodR, tableW / 2 + inset, tableH / 2 + inset));
 
   return { pockets, wires, rails };
+}
+
+// Push a throat's wire outward by `r`.
+//
+// The polyline is the wire's CENTRELINE — both the visual tube and the Ammo
+// capsules are swept along it at radius `r` — so half the rod used to lie inboard
+// of these points, straddling the rail it butts against rather than meeting it.
+// Offsetting by exactly the radius puts the wire's INNER SURFACE where the
+// centreline used to be: the rod now begins where the rail ends, and the pocket
+// cavity opens up by `r` all round.
+//
+// The two END points are treated differently from the interior, and that
+// difference is the whole reason the cabinet survives this. Interior vertices get
+// a plain miter — the crossing of the two adjacent offset lines. The ends are
+// instead slid ALONG their offset line until they land back on the table's outer
+// edge (x = ±edgeX, z = ±edgeZ), the line they already sat on, rather than being
+// pushed off it perpendicular like everything else.
+//
+// That matters because table_top_outline() is nothing but these wires
+// concatenated, and it relies on the straight run between two consecutive throats
+// being the cushion's outer top edge. Keep the ends on the table edge and that
+// run stays exactly where it was, so the deck still meets every rail with no
+// seam. Offset them perpendicular instead and the whole run lifts outward by `r`,
+// opening a rod-wide slot straight into the cabinet along every cushion.
+//
+// The visible consequence: an end point no longer coincides with the rail's cap
+// corner — it sits further round the mouth, by r/sin(angle between wire and rail)
+// — and it is the wire's inner SURFACE, not its centreline, that now lands on
+// that corner.
+function offset_wire_outward(wire, r, edgeX, edgeZ) {
+  const n = wire.length;
+  if (n < 2) return wire.map(p => p.slice());
+
+  // One outward normal per segment. The boundary loop that these throats belong
+  // to runs counter-clockwise in (x, z) — rail_pts has positive signed area — so
+  // (dz, -dx) faces away from the playing area for every segment of it.
+  const segs = [];
+  for (let i = 0; i + 1 < n; i++) {
+    const [x1, z1] = wire[i], [x2, z2] = wire[i + 1];
+    const dx = x2 - x1, dz = z2 - z1;
+    const len = Math.hypot(dx, dz) || 1;
+    const ux = dx / len, uz = dz / len;
+    segs.push({ px: x1 + uz * r, pz: z1 - ux * r, ux, uz });
+  }
+
+  const out = new Array(n);
+  for (let i = 1; i < n - 1; i++) out[i] = miter(segs[i - 1], segs[i]);
+  out[0]     = slide_to_edge(segs[0],     wire[0],     edgeX, edgeZ);
+  out[n - 1] = slide_to_edge(segs[n - 2], wire[n - 1], edgeX, edgeZ);
+  return out;
+}
+
+// Where two offset segment lines cross (each given as a point + unit direction).
+function miter(a, b) {
+  const denom = a.ux * b.uz - a.uz * b.ux;
+  // Collinear: the vertex sits mid-way along a straight run, so both offsets are
+  // the same line and a's offset point is already the answer.
+  if (Math.abs(denom) < 1e-12) return [a.px, a.pz];
+  const t = ((b.px - a.px) * b.uz - (b.pz - a.pz) * b.ux) / denom;
+  return [a.px + a.ux * t, a.pz + a.uz * t];
+}
+
+// Walk along an offset line until it meets the table edge that `orig` sat on —
+// x = ±edgeX for a wire ending on a side, z = ±edgeZ for one ending on an end.
+function slide_to_edge(s, orig, edgeX, edgeZ) {
+  const onSide = Math.abs(Math.abs(orig[0]) - edgeX) < 1e-9;
+  const [along, target, from] = onSide
+    ? [s.ux, orig[0], s.px]
+    : [s.uz, orig[1], s.pz];
+  // Parallel to its own edge — no crossing to find. Cannot happen on this table
+  // (every wire leaves the edge at an angle), so rather than invent a point,
+  // leave the end where the plain offset put it.
+  if (Math.abs(along) < 1e-12) return [s.px, s.pz];
+  const t = (target - from) / along;
+  return [s.px + s.ux * t, s.pz + s.uz * t];
 }
 
 export function rail_pts(tableW, tableH) {
