@@ -9,7 +9,8 @@ const canvas = document.getElementById('stage');
 // Full half-extents of the table INCLUDING the pockets + rail lip, plus a little
 // margin. The overhead (orthographic) view is sized to contain this at zoom 1, so
 // the whole table always fits on screen whatever the aspect ratio (esp. portrait
-// mobile). In the top view screen-X ↔ world-X (long axis), screen-Y ↔ world-Z.
+// mobile). The top view lays the table's long axis (world X) along whichever
+// screen axis is longer — see topPortrait.
 //
 // The cabinet's widest section (cabinetRTop, at the rail line) is the outermost
 // thing in the scene, so the bounds come from it rather than from a hand-tuned
@@ -18,6 +19,19 @@ const CABINET_HALF_X = tableW / 2 + 0.015 + cabinetRTop;   // ≈ 1.30
 const CABINET_HALF_Z = tableH / 2 + 0.015 + cabinetRTop;   // ≈ 0.74
 const TABLE_HALF_X = CABINET_HALF_X + 0.02;
 const TABLE_HALF_Z = CABINET_HALF_Z + 0.02;
+
+// True when the overhead view is turned a quarter turn so the table's long axis
+// runs UP the screen instead of across it. Set from the canvas aspect in
+// fitCanvas; cue.js reads it to orient the camera and the pan/pinch mapping.
+//
+// The rule is just `aspect < 1`, and that is not a guess about what "feels"
+// portrait — it is exactly the crossover. Contain-fitting a 2*Hx by 2*Hz box
+// needs a half-height of max(Hz, Hx/aspect) laid out along X and max(Hx,
+// Hz/aspect) laid out along Z; with Hx > Hz those two are equal at aspect 1 and
+// each wins on its own side of it. So turning at 1 always shows the table as
+// large as it can possibly be drawn.
+let topPortrait = false;
+export function isTopPortrait() { return topPortrait; }
 
 export function initScene() {
   scene = new THREE.Scene();
@@ -177,11 +191,14 @@ export function fitCanvas() {
     perspCamera.aspect = aspect;
     perspCamera.updateProjectionMatrix();
   }
+  topPortrait = aspect < 1;
   if (orthoCamera) {
-    // Contain-fit: vertical half-height must cover world-Z (table short axis) AND
-    // world-X (long axis) once divided by the aspect — whichever is larger wins,
-    // so nothing is ever cropped, from wide desktop to portrait phone.
-    const halfH = Math.max(TABLE_HALF_Z, TABLE_HALF_X / aspect);
+    // Contain-fit against whichever way the table is laid out: the vertical
+    // half-height must cover the axis running up the screen AND the across-screen
+    // axis once divided by the aspect — whichever is larger wins, so nothing is
+    // ever cropped, from wide desktop to portrait phone.
+    const [up, across] = topPortrait ? [TABLE_HALF_X, TABLE_HALF_Z] : [TABLE_HALF_Z, TABLE_HALF_X];
+    const halfH = Math.max(up, across / aspect);
     orthoCamera.left = -halfH * aspect;
     orthoCamera.right = halfH * aspect;
     orthoCamera.top = halfH;

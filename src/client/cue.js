@@ -1,6 +1,6 @@
 // src/cue.js
 import * as THREE from "/lib/three.module.js";
-import { scene, camera, setCameraMode } from './scene.js';
+import { scene, camera, setCameraMode, isTopPortrait } from './scene.js';
 import { R } from '../shared/constants.js';
 
 // Cue stick dimensions
@@ -136,11 +136,31 @@ export function endAimOrbit() { if (aimOrbit) aimOrbit.returning = true; }
 // it, so dragging down moves the table down on screen). dxPx/dyPx are pixel
 // deltas since the last move; viewHpx is the canvas height in CSS pixels.
 let topPanX = 0, topPanZ = 0;
+
+// Which way world X and Z run on screen in the overhead view. Landscape lays the
+// long axis across the screen (screen-right = +X, screen-DOWN = +Z, i.e. up =
+// -Z); portrait turns the table a quarter turn so the long axis runs up the
+// screen instead (screen-right = +Z, screen-down = -X, i.e. up = +X). The
+// quarter turn is chosen so the breaking end (-X, where the cue ball racks) sits
+// at the BOTTOM of a portrait screen — nearest the player, same as the aim view,
+// which starts behind -X.
+//
+// Everything that maps pixels to the cloth goes through this, so there is one
+// place to change if the turn direction ever wants flipping. (Cursor picking
+// doesn't: it raycasts through the camera, so it follows for free.)
+function topBasis() {
+  return isTopPortrait()
+    ? { rx:  0, rz: 1, dx: -1, dz: 0 }    // right = +Z, down = -X
+    : { rx:  1, rz: 0, dx:  0, dz: 1 };   // right = +X, down = +Z
+}
+
 export function dragPanTop(dxPx, dyPx, viewHpx) {
   if (!camera.isOrthographicCamera || !viewHpx) return;
   const wpp = (camera.top - camera.bottom) / camera.zoom / viewHpx;   // world metres per pixel
-  topPanX -= dxPx * wpp;
-  topPanZ -= dyPx * wpp;
+  const b = topBasis();
+  // Pan the CAMERA against the drag so the cloth tracks the finger.
+  topPanX -= (dxPx * b.rx + dyPx * b.dx) * wpp;
+  topPanZ -= (dxPx * b.rz + dyPx * b.dz) * wpp;
 }
 export function resetTopPan() { topPanX = 0; topPanZ = 0; }
 
@@ -153,16 +173,20 @@ export function pinchTop(midX, midY, prevMidX, prevMidY, dist, prevDist, viewW, 
   const frustumH = camera.top - camera.bottom;      // world height spanned at zoom 1
   const cx = viewW / 2, cy = viewH / 2;
   const wppOld = frustumH / camera.zoom / viewH;     // world metres per pixel (as shown)
-  // World point under the previous pinch midpoint (screen-X→+X, screen-Y→+Z).
-  const wx = topPanX + (prevMidX - cx) * wppOld;
-  const wz = topPanZ + (prevMidY - cy) * wppOld;
+  const b = topBasis();
+  // World point under the previous pinch midpoint, in whichever orientation the
+  // overhead view is currently in (see topBasis).
+  const px = prevMidX - cx, py = prevMidY - cy;
+  const wx = topPanX + (px * b.rx + py * b.dx) * wppOld;
+  const wz = topPanZ + (px * b.rz + py * b.dz) * wppOld;
   // Height from the pinch scale: fingers apart (scale > 1) → lower camera → zoom in.
   const newHeight = clamp(topHeight / (dist / prevDist), TOP_H_MIN, TOP_H_MAX);
   topHeight = newHeight; topHeightTarget = newHeight;
   const wppNew = frustumH / (TOP_CAM_HEIGHT / newHeight) / viewH;
   // Pan so that same world point sits under the new midpoint.
-  topPanX = wx - (midX - cx) * wppNew;
-  topPanZ = wz - (midY - cy) * wppNew;
+  const qx = midX - cx, qy = midY - cy;
+  topPanX = wx - (qx * b.rx + qy * b.dx) * wppNew;
+  topPanZ = wz - (qx * b.rz + qy * b.dz) * wppNew;
 }
 // The overhead view renders through the orthographic camera (true plan view);
 // everything else uses the perspective one. scene.js swaps the active camera.
@@ -405,13 +429,16 @@ export function placeCamera() {
   topHeight += (topHeightTarget - topHeight) * ZOOM_EASE;
 
   // Overhead view: look straight down at the table centre so the whole table
-  // is visible. Up = -Z keeps the long axis (X) horizontal on screen. This is
-  // independent of the orbit anchor, so handle it before the anchor check —
-  // otherwise the very first (break) placement, before any shot has set the
-  // anchor, would fall through to the default camera instead of top view.
+  // is visible. The `up` vector is what turns the plan to match the screen —
+  // up = -Z lays the long axis (X) across a landscape screen, up = +X stands it
+  // up the screen on a portrait one (and puts the breaking end at the bottom).
+  // This is independent of the orbit anchor, so handle it before the anchor
+  // check — otherwise the very first (break) placement, before any shot has set
+  // the anchor, would fall through to the default camera instead of top view.
   if (viewMode === 'top') {
     camera.position.set(topPanX, topHeight, topPanZ);
-    camera.up.set(0, 0, -1);
+    if (isTopPortrait()) camera.up.set(1, 0, 0);
+    else                 camera.up.set(0, 0, -1);
     camera.lookAt(topPanX, 0, topPanZ);
     // Orthographic size ignores camera height, so map the scroll-driven
     // height onto ortho zoom instead: default height = zoom 1, scrolling
