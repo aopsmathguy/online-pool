@@ -1,8 +1,15 @@
 // src/scene.js
 import * as THREE from "/lib/three.module.js";
 import { tableW, tableH, cabinetRTop } from '../shared/constants.js';
+import { qualityLevel, onQualityChange } from './settings.js';
 
 let renderer, scene, camera, perspCamera, orthoCamera;
+// Every shadow-capable light, split by role: the overhead lamps (centre one
+// FIRST — see applyQuality) and the four grazing fills. The graphics presets
+// turn shadow casting on and off per group, so they have to be reachable after
+// initScene rather than dropped into the graph and forgotten.
+const bulbs = [];
+const sideLights = [];
 let DPR = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
 const canvas = document.getElementById('stage');
 
@@ -38,13 +45,11 @@ export function initScene() {
   scene.background = new THREE.Color('#0b1020');
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(canvas.clientWidth, canvas.clientHeight, false);
-  renderer.shadowMap.enabled = true;
-  // PCF with a soft kernel. The default (PCFShadowMap) point-samples the depth
-  // map, so a shadow edge lands on texel boundaries and reads as stair-stepped
-  // pixels — which is most of why these looked like a bitmap.
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // Pixel ratio, shadow-map enable/type/size and which lights cast are all set
+  // from the graphics preset at the bottom of initScene (applyQuality), so
+  // there is exactly one place that decides them — the startup path and a
+  // mid-game change to the slider run the same code.
 
   perspCamera = new THREE.PerspectiveCamera(45, canvas.clientWidth / Math.max(1, canvas.clientHeight), 0.01, 100);
   perspCamera.position.set(-tableW * 0.5, 0.4, 0);
@@ -68,7 +73,9 @@ export function initScene() {
   // bulbs: ambient reaches into the shadows too, so more than this and the
   // cloth's shadows start washing out.
   scene.add(new THREE.AmbientLight(0xffffff, 0.3));
-  for (const x of [-BULB_SPACING, 0, BULB_SPACING]) addBulb(x);
+  // Centre lamp first: the presets below Medium keep only the FIRST bulb's
+  // shadow, and the middle of the table is where it does the most good.
+  for (const x of [0, -BULB_SPACING, BULB_SPACING]) addBulb(x);
 
   // Soft fill from the four cardinal directions (see addSideLight): reads as
   // ambient from the sides, but grazes in low enough that each rail's overhang
@@ -77,9 +84,97 @@ export function initScene() {
   addSideLight(1, 0); addSideLight(-1, 0);
   addSideLight(0, 1); addSideLight(0, -1);
 
+  applyQuality(qualityLevel());
   window.addEventListener('resize', fitCanvas);
   fitCanvas();
   return { scene, camera, renderer, canvas, DPR };
+}
+
+// ---- Graphics presets ---------------------------------------------------------
+// Everything the renderer and the lights owe to the quality slider, in one pass.
+// Safe to call at any time: it only ever reconfigures objects that already exist.
+function applyQuality(q) {
+  if (!renderer) return;   // before initScene — initScene calls this itself
+
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, q.maxPixelRatio));
+
+  // Neither of these is watched by the renderer: a material's compiled program
+  // bakes in USE_SHADOWMAP and the filter kind, and three only recompiles when
+  // the material's own version changes. So flipping either without marking the
+  // materials dirty leaves every surface running last preset's shader — shadows
+  // that are switched off keep drawing, and switched on never appear.
+  const wantType = q.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+  const recompile = renderer.shadowMap.enabled !== q.shadows || renderer.shadowMap.type !== wantType;
+  renderer.shadowMap.enabled = q.shadows;
+  renderer.shadowMap.type = wantType;
+  if (recompile) markMaterialsDirty();
+
+  bulbs.forEach((b, i) => configureShadow(b, i < q.shadowBulbs, q.shadowMapSize));
+  // The side lights' maps stay at 1024 whatever the preset: they only exist at
+  // Ultra, and their job is a soft band rather than a crisp edge, so the size
+  // dial does nothing for them that turning them off doesn't do better.
+  for (const L of sideLights) configureShadow(L, q.sideShadows, 1024);
+
+  // Shadow maps are only redrawn when the renderer thinks something moved. A
+  // preset change moves nothing, so without this the balls keep their old
+  // shadows (at the old resolution) until the next shot.
+  renderer.shadowMap.needsUpdate = true;
+}
+
+// Whether a light casts, and at what map size. Setting mapSize alone does
+// nothing once the render target exists — WebGLShadowMap allocates at the size
+// it first saw and then reuses that target — so the old one has to be released
+// AND nulled to make it allocate again. A light that has stopped casting drops
+// its map for the same reason in reverse: the memory is the whole point of
+// turning it off, and it reallocates by itself if the preset comes back up.
+function configureShadow(light, cast, size) {
+  const S = light.shadow;
+  light.castShadow = cast;
+  const stale = !cast || S.mapSize.width !== size;
+  if (stale && S.map) { S.map.dispose(); S.map = null; }
+  if (cast) S.mapSize.set(size, size);
+}
+
+function markMaterialsDirty() {
+  scene.traverse((o) => {
+    const m = o.material;
+    if (!m) return;
+    if (Array.isArray(m)) for (const mm of m) mm.needsUpdate = true;
+    else m.needsUpdate = true;
+  });
+}
+
+onQualityChange(applyQuality);
+
+// debug (browser tests): what the preset ACTUALLY did, read back off the
+// renderer and the live materials rather than off the preset table — the whole
+// risk in applying quality live is that a setting is stored but never reaches
+// the GPU objects, and only a read-back can catch that.
+export function graphicsDebug() {
+  const casters = bulbs.filter(b => b.castShadow);
+  const texels = new Set();
+  scene.traverse((o) => {
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m) continue;
+      for (const slot of ['map', 'normalMap', 'roughnessMap']) {
+        const img = m[slot]?.image;
+        if (img) texels.add(`${slot}:${img.width || img.naturalWidth}`);
+      }
+    }
+  });
+  return {
+    pixelRatio: renderer.getPixelRatio(),
+    shadows: renderer.shadowMap.enabled,
+    softShadows: renderer.shadowMap.type === THREE.PCFSoftShadowMap,
+    bulbShadows: casters.length,
+    sideShadows: sideLights.filter(l => l.castShadow).length,
+    bulbMapSize: casters[0]?.shadow.mapSize.width ?? 0,
+    // Shadow render targets still allocated — the memory a lower preset is
+    // supposed to have handed back.
+    liveShadowMaps: [...bulbs, ...sideLights].filter(l => l.shadow.map).length,
+    textures: [...texels].sort(),
+  };
 }
 
 // One shaded bulb hung over the cloth at world x, pointing straight down.
@@ -108,14 +203,13 @@ function addBulb(x) {
   bulb.target.position.set(x, 0, 0);
   scene.add(bulb.target);
 
-  bulb.castShadow = true;
   // A spot's shadow map covers only its cone, so it buys sharpness the old
   // single directional light couldn't: a 2.88 m footprint at 2048 is ~1.4 mm
   // per texel, against the 2.5 mm that rig managed. Three maps at this size is
-  // ~50 MB of depth texture though — this is the dial to turn down first if
-  // it's too heavy on a phone, and dropping to 1024 only costs ~2.8 mm.
+  // ~50 MB of depth texture though — which is why the map size and the number
+  // of casting lamps are the first two things the quality presets turn down.
+  // (castShadow and mapSize are set by applyQuality; 1024 costs only ~2.8 mm.)
   const S = bulb.shadow;
-  S.mapSize.set(2048, 2048);
   S.camera.near = 0.5;
   S.camera.far  = 3.0;
   // Depth bias only — normalBias MUST stay 0 here, and it is not a matter of
@@ -137,6 +231,7 @@ function addBulb(x) {
   S.normalBias = 0;
 
   scene.add(bulb);
+  bulbs.push(bulb);
 }
 
 // One distant, low fill light out past a cushion, in cardinal direction (dx, dz)
@@ -158,9 +253,10 @@ function addSideLight(dx, dz) {
   L.target.position.set(0, 0, 0);
   scene.add(L.target);
 
-  L.castShadow = true;
+  // castShadow and mapSize come from the quality preset (applyQuality): these
+  // four are SECONDARY lights, so they are the first shadows to go — seven
+  // shadow maps drop to three the moment you step off Ultra.
   const S = L.shadow;
-  S.mapSize.set(1024, 1024);
   // Ortho frustum big enough to contain the whole table from this oblique angle;
   // near/far bracket its depth along the light's ~8 m line of sight to the centre.
   S.camera.left = -1.8; S.camera.right = 1.8;
@@ -173,6 +269,7 @@ function addSideLight(dx, dz) {
   S.bias = -0.0004;
   S.normalBias = 0;
   scene.add(L);
+  sideLights.push(L);
 }
 
 // Swap the active camera: 'ortho' for the bird's-eye view, 'persp' otherwise.

@@ -5,6 +5,7 @@
 import * as THREE from "/lib/three.module.js";
 import { table_parts, rail_solid, RAIL_FACES, cabinet_section, table_top_outline, pocket_positions } from '../shared/table.js';
 import { pocketWireY, inset, cabinetRTop, cabinetEdgeR } from '../shared/constants.js';
+import { qualityLevel, onQualityChange } from './settings.js';
 export { rail_pts, felt_pts, pocket_positions, table_parts } from '../shared/table.js';
 
 export function makePolylineMesh(pointsXZ, wireR, wireY, opts = {}) {
@@ -168,39 +169,6 @@ const FELT_MAPS = {
       normalMap:    '/assets/felt/normal.png',
       roughnessMap: '/assets/felt/roughness.jpg',
 };
-// Memoised: the bed and the rails are the same cloth, so they share one set of
-// GPU textures. Loading a second copy would both waste memory and risk the two
-// drifting to different repeats — and the whole point is that the weave runs
-// across the bed and up onto the rails at one continuous scale.
-let feltTextures = null;
-function makeFeltTextures() {
-      if (feltTextures) return { ...feltTextures };
-      const loader = new THREE.TextureLoader();
-      const out = {};
-      for (const [slot, url] of Object.entries(FELT_MAPS)) {
-        const tex = loader.load(url);
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(FELT_REPEAT, FELT_REPEAT);
-        tex.anisotropy = 8;
-        // Only the colour map is authored in sRGB; normal/roughness are data.
-        if (slot === 'map') tex.colorSpace = THREE.SRGBColorSpace;
-        out[slot] = tex;
-      }
-      feltTextures = out;
-      return { ...out };
-}
-
-// Felt on a mesh whose UVs are already in metres (see makeTableRails). Kept
-// beside the bed's felt setup so the two can't drift apart.
-function feltMaterial() {
-      const mat = new THREE.MeshStandardMaterial({ side: THREE.FrontSide, flatShading: true });
-      Object.assign(mat, makeFeltTextures());
-      mat.color.set(0xffffff);          // the baize photo IS the colour
-      mat.roughness = 1.0;              // roughnessMap multiplies this
-      mat.metalness = 0.0;
-      mat.normalScale = new THREE.Vector2(0.6, 0.6);
-      return mat;
-}
 
 // Scanned oak table wood (assets/wood/) for the cabinet, replacing the old flat
 // brown. Same idea as the felt: the colour lives IN the photo, so the material
@@ -220,21 +188,128 @@ const WOOD_MAPS = {
       map:          '/assets/wood/color.jpg',
       roughnessMap: '/assets/wood/roughness.jpg',
 };
-let woodTextures = null;
-function makeWoodTextures() {
-      if (woodTextures) return { ...woodTextures };
+
+// ---- Texture sets, sized by the graphics preset -------------------------------
+//
+// Both surfaces are the same story: a memoised set of GPU textures shared by
+// every mesh that wears them (the bed and the rails are the same cloth, the
+// skirt and the deck the same oak), built at whatever resolution and map count
+// the current preset asks for.
+//
+// Two dials, and they save different things:
+//   texMax     caps each map's edge, redrawing the decoded image into a smaller
+//              canvas. That is a VRAM and mip-chain saving only — the file still
+//              downloads at full size, because there is one file per map on
+//              disk. 4096 -> 1024 is 16x less texture memory for that map.
+//   normalMap/roughnessMap
+//              drop the map entirely, so it is never even fetched. This is the
+//              bandwidth dial: felt/normal.png alone is 11 MB, and anything
+//              below High never asks for it.
+//
+// Every slot a preset omits must be actively nulled on the material rather than
+// just left out of the assign — a material built at Ultra and then dropped to
+// Low would otherwise keep the very maps the preset is trying to shed. That is
+// what TEX_SLOTS is for.
+const TEX_SLOTS = ['map', 'normalMap', 'roughnessMap'];
+
+function buildTextureSet(maps, repeat) {
+      const q = qualityLevel();
       const loader = new THREE.TextureLoader();
       const out = {};
-      for (const [slot, url] of Object.entries(WOOD_MAPS)) {
-        const tex = loader.load(url);
+      for (const [slot, url] of Object.entries(maps)) {
+        if (slot === 'normalMap' && !q.normalMap) continue;
+        if (slot === 'roughnessMap' && !q.roughnessMap) continue;
+        // The image is decoded at full size and then shrunk in place: three has
+        // already stamped it onto the texture by the time onLoad runs, so
+        // swapping .image and re-flagging it is what makes the upload use the
+        // small one. Textures below the cap are left exactly as they are.
+        const tex = loader.load(url, (t) => {
+          const small = downscaleImage(t.image, q.texMax);
+          if (small !== t.image) { t.image = small; t.needsUpdate = true; }
+        });
         tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(WOOD_REPEAT, WOOD_REPEAT);
-        tex.anisotropy = 8;
+        tex.repeat.set(repeat, repeat);
+        tex.anisotropy = q.anisotropy;
+        // Only the colour map is authored in sRGB; normal/roughness are data.
         if (slot === 'map') tex.colorSpace = THREE.SRGBColorSpace;
         out[slot] = tex;
       }
-      woodTextures = out;
-      return { ...out };
+      return out;
+}
+
+// Redraw an image into a canvas whose long edge is at most maxPx. Both source
+// tiles are square powers of two, so every step down stays a power of two and
+// keeps repeat-wrapping + mipmapping happy.
+function downscaleImage(img, maxPx) {
+      const w = img?.naturalWidth || img?.width || 0;
+      const h = img?.naturalHeight || img?.height || 0;
+      const longest = Math.max(w, h);
+      if (!longest || longest <= maxPx) return img;
+      const s = maxPx / longest;
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * s));
+      c.height = Math.max(1, Math.round(h * s));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      return c;
+}
+
+// The two live sets, plus the materials wearing them. Both are rebuilt in place
+// when the quality slider moves, which is why the materials have to be tracked:
+// they are handed out to meshes all over the scene and there is no other way
+// back to them.
+let feltTextures = null, woodTextures = null;
+const feltMaterials = new Set(), woodMaterials = new Set();
+
+const feltSet = () => (feltTextures ||= buildTextureSet(FELT_MAPS, FELT_REPEAT));
+const woodSet = () => (woodTextures ||= buildTextureSet(WOOD_MAPS, WOOD_REPEAT));
+
+// Dress a material as baize. The photo IS the colour, so the material tints
+// white — a green base here would multiply the green twice and turn the cloth
+// muddy.
+function applyFelt(mat) {
+      feltMaterials.add(mat);
+      const set = feltSet();
+      for (const slot of TEX_SLOTS) mat[slot] = set[slot] || null;
+      mat.color.set(0xffffff);
+      mat.metalness = 0.0;
+      // roughnessMap MULTIPLIES this, so 1.0 is "let the map decide". With no
+      // map that same 1.0 is a real value — dead matte, which for worsted cloth
+      // is close enough to right that the low presets need no other fix-up.
+      mat.roughness = set.roughnessMap ? 1.0 : 0.95;
+      mat.normalScale = new THREE.Vector2(0.6, 0.6);
+      mat.needsUpdate = true;
+      return mat;
+}
+
+// Dress a material as the scanned oak. Same reasoning as applyFelt, except the
+// no-map roughness matters more here: the grain's sheen lives entirely in the
+// roughness map, so without it the wood needs the old hand-set 0.62 or the
+// cabinet reads as cardboard.
+function applyWood(mat) {
+      woodMaterials.add(mat);
+      const set = woodSet();
+      for (const slot of TEX_SLOTS) mat[slot] = set[slot] || null;
+      mat.color.set(0xffffff);
+      mat.roughness = set.roughnessMap ? 1.0 : 0.62;
+      mat.needsUpdate = true;
+      return mat;
+}
+
+// Quality changed: throw both sets away and re-dress every material that was
+// ever built from them. The old textures are disposed rather than dropped —
+// they are the megabytes the lower preset was asked to reclaim.
+onQualityChange(() => {
+      for (const set of [feltTextures, woodTextures]) {
+        if (set) for (const tex of Object.values(set)) tex.dispose();
+      }
+      feltTextures = woodTextures = null;
+      for (const mat of feltMaterials) applyFelt(mat);
+      for (const mat of woodMaterials) applyWood(mat);
+});
+
+// Felt on a mesh whose UVs are already in metres (see makeTableRails).
+function feltMaterial() {
+      return applyFelt(new THREE.MeshStandardMaterial({ side: THREE.FrontSide, flatShading: true }));
 }
 
 // A horizontal surface from a closed polyline, optionally with holes punched in
@@ -288,17 +363,8 @@ export function makePlanarMeshFromPolyline(points, thickness, y, options = {}) {
       const mat = new THREE.MeshStandardMaterial({
         color, metalness, roughness, side: THREE.DoubleSide,
       });
-      if (felt) {
-        Object.assign(mat, makeFeltTextures());
-        mat.color.set(0xffffff);          // the baize photo IS the colour
-        mat.roughness = 1.0;              // roughnessMap multiplies this
-        mat.normalScale = new THREE.Vector2(0.6, 0.6);
-      }
-      if (wood) {
-        Object.assign(mat, makeWoodTextures());
-        mat.color.set(0xffffff);          // the wood photo IS the colour
-        mat.roughness = 1.0;              // roughnessMap multiplies this
-      }
+      if (felt) applyFelt(mat);
+      if (wood) applyWood(mat);
 
       const mesh = new THREE.Mesh(geom, mat);
       mesh.receiveShadow = receiveShadow;
@@ -346,9 +412,7 @@ export function makeTableCabinet(tableW, tableH, opts = {}) {
         color, roughness, metalness: 0.0, side: THREE.DoubleSide, flatShading: false,
       });
       // The wood photo IS the colour; the roughness map carries the grain's sheen.
-      Object.assign(mat, makeWoodTextures());
-      mat.color.set(0xffffff);
-      mat.roughness = 1.0;
+      applyWood(mat);
 
       // --- skirt ---------------------------------------------------------
       // A stack of rings, lofted in order. Every ring is a cabinet_section, so

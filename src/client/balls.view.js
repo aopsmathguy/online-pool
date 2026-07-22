@@ -7,9 +7,15 @@ import { scene } from './scene.js';
 import { TEX_V_STRETCH, R, RACK_QUAT } from '../shared/constants.js';
 import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
 import { isInsideAnyPocket } from '../shared/pockets.js';
+import { qualityLevel, onQualityChange } from './settings.js';
 
 function makeBallTexture({ style, color = "#ffffff", number = null }) {
-  const size = 1024;
+  const q = qualityLevel();
+  // Drawn, not loaded, so the graphics preset picks the size straight up front:
+  // there are ~16 of these live and they are the only textures on the balls, so
+  // 1024 -> 256 is 16x off the whole rack's texture memory. Every coordinate
+  // below is a fraction of `size`, so the artwork just scales.
+  const size = q.ballTex;
   const sY = TEX_V_STRETCH;
   const c0 = document.createElement('canvas'); c0.width = c0.height = size;
   const ctx0 = c0.getContext('2d');
@@ -55,7 +61,7 @@ function makeBallTexture({ style, color = "#ffffff", number = null }) {
   ctx.drawImage(c0, 0, 0, size, size, 0, -pad, size, size * sY);
 
   const tex = new THREE.CanvasTexture(c);
-  tex.anisotropy = 16; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
+  tex.anisotropy = q.anisotropy; tex.minFilter = THREE.LinearMipmapLinearFilter; tex.magFilter = THREE.LinearFilter;
   tex.generateMipmaps = true;
   return tex;
 }
@@ -90,7 +96,21 @@ function makeBallMesh({ style, color, number = null }) {
 }
 
 // --- id-keyed registry ------------------------------------------------------
-const views = new Map();   // id -> { mesh, number, style }
+const views = new Map();   // id -> { mesh, number, style, color }
+
+// Quality changed: the cached textures are the wrong size now. Redraw them at
+// the new one and re-point every live ball's material at its replacement — the
+// meshes themselves are untouched, so a rebuild mid-shot can't disturb a
+// replay's poses. `color` is carried in the view record purely so a ball can be
+// re-textured here without going back to BALL_COLORS for it.
+onQualityChange(() => {
+  for (const tex of texCache.values()) tex.dispose();
+  texCache.clear();
+  for (const v of views.values()) {
+    v.mesh.material.map = ballTexture(v);
+    v.mesh.material.needsUpdate = true;
+  }
+});
 
 export function buildRack(layout) {
   clearRack();
@@ -104,7 +124,7 @@ export function buildRack(layout) {
     // no frames stream while the table is at rest, so a mismatch here would
     // snap-rotate every ball on the break's first replay frame.
     mesh.quaternion.set(RACK_QUAT.x, RACK_QUAT.y, RACK_QUAT.z, RACK_QUAT.w);
-    views.set(spec.id, { mesh, number, style });
+    views.set(spec.id, { mesh, number, style, color });
   }
 }
 
@@ -151,7 +171,7 @@ export function syncRack(items) {
       if (v) removeBallView(it.id);
       const style = ballStyle(number);
       const color = number != null ? BALL_COLORS[number] : "#ffffff";
-      v = { mesh: makeBallMesh({ style, color, number }), number, style };
+      v = { mesh: makeBallMesh({ style, color, number }), number, style, color };
       views.set(it.id, v);
     }
     v.mesh.position.set(it.x, it.y, it.z);

@@ -14,6 +14,7 @@ import { addYaw, addPitch, setStrikeOffset, resetStrikeOffset,
          getViewMode, freeLookMouse, freeMove, zoomStep, dragPanTop, pinchTop, pinchAim,
          beginAimOrbit, dragAimOrbit, endAimOrbit, isAimOrbiting } from './cue.js';
 import { powerBarRect, spinDialRect } from './hudCanvas.js';
+import { isReverseAim } from './settings.js';
 
 const MOUSE_SENS_X = 0.0025;     // radians per pixel of horizontal drag (yaw)
 const MOUSE_SENS_Y = 0.0020;     // radians per pixel of vertical drag (pitch)
@@ -193,7 +194,15 @@ export function bindInput(canvas, handlers) {
       if (drag === 'power') return updatePowerDrag(e.clientY);
       if (drag === 'spin')  return setSpinFrom(p);
       if (drag === 'place') return onPlaceMove(e.clientX, e.clientY);
-      if (drag === 'aim')   { addYaw(-dx * MOUSE_SENS_X); addPitch(-dy * MOUSE_SENS_Y); return; }
+      // The default is "drag the table": the cue swings the opposite way to the
+      // finger, as if you had hold of the cloth. Reverse aim is the other
+      // convention — "drag the cue" — and it flips BOTH axes, because a mapping
+      // that inverted only the yaw would leave the two halves of one diagonal
+      // drag fighting each other.
+      if (drag === 'aim')   {
+        const s = isReverseAim() ? 1 : -1;
+        addYaw(s * dx * MOUSE_SENS_X); addPitch(s * dy * MOUSE_SENS_Y); return;
+      }
       if (drag === 'orbit') { dragAimOrbit(dx, dy); return; }
       if (drag === 'look')  { freeLookMouse(dx, dy); return; }
       if (drag === 'pan')   { dragPanTop(dx, dy, canvas.getBoundingClientRect().height); return; }

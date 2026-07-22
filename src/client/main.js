@@ -2,7 +2,7 @@
 // the table + balls + cue from server state and sends input. All authoritative
 // simulation runs on the server (see server/index.js + src/sim.js).
 import * as THREE from "/lib/three.module.js";
-import { initScene, render, camera } from './scene.js';
+import { initScene, render, camera, graphicsDebug } from './scene.js';
 import {
   tableW, tableH, wireY, rodR, R, cupDepth, cupY, cupR,
   cabinetRTop, cabinetRBottom, cabinetYTop, cabinetYBottom,
@@ -21,6 +21,9 @@ import {
   zoomCamera, initFreeCamFromCurrent, resetTopPan,
 } from './cue.js';
 import { bindInput } from './input.js';
+import {
+  QUALITY_LEVELS, getQuality, setQuality, isReverseAim, setReverseAim,
+} from './settings.js';
 import {
   buildRack, syncRack, setCuePosition,
   getCueMeshPosition, getObstaclePositions, clearRack, ballIds, sunkNumbers,
@@ -274,6 +277,34 @@ $('menuBtn').addEventListener('click', () => $('sideMenu').classList.toggle('col
 $('helpToggle').addEventListener('click', () => {
   const collapsed = $('helpPanel').classList.toggle('collapsed');
   $('helpToggle').textContent = collapsed ? 'Instructions ▸' : 'Instructions ▾';
+});
+
+// ---- Options (reverse aim + graphics quality) ---------------------------------
+// The controls only move the stored values; settings.js pushes the change out to
+// the renderer, the textures and the ball art. Both are read back from storage
+// on load, so the widgets have to be seeded from it rather than from the markup.
+$('optionsToggle').addEventListener('click', () => {
+  const collapsed = $('optionsPanel').classList.toggle('collapsed');
+  $('optionsToggle').textContent = collapsed ? 'Options ▸' : 'Options ▾';
+});
+$('reverseAim').checked = isReverseAim();
+$('reverseAim').addEventListener('change', (e) => setReverseAim(e.target.checked));
+
+const qualitySlider = $('qualitySlider');
+function showQuality(i) {
+  const level = QUALITY_LEVELS[i];
+  $('qualityName').textContent = level.name;
+  $('qualityBlurb').textContent = level.blurb;
+}
+qualitySlider.value = String(getQuality());
+showQuality(getQuality());
+// 'input', not 'change': the label should track the knob as it is dragged. Each
+// step rebuilds shadow maps and textures, but only on a step — the slider is
+// quantized to the five presets, so a drag across it fires at most five times.
+qualitySlider.addEventListener('input', () => {
+  const i = parseInt(qualitySlider.value, 10) || 0;
+  showQuality(i);
+  setQuality(i);
 });
 $('btnJoin').addEventListener('click',   () => {
   const code = ($('codeInput').value || '').toUpperCase().trim();
@@ -788,6 +819,7 @@ window.__replay = () => {
   return { playing: !st.live, pending: st.unwatched, live: st.live, following: st.following, slot: st.slot };
 };
 window.__timeline = () => timeline.state();
+window.__gfx = graphicsDebug;   // debug: what the graphics preset did to the renderer
 
 const params = new URLSearchParams(location.search);
 if (params.get('name')) $('nameInput').value = params.get('name');

@@ -58,6 +58,24 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 .sideMenuBody .btnRow { margin:0; }
 .sideMenuBody .btnRow button { flex:1; }
 
+/* Options expander (inside the menu): reverse aim + graphics quality.
+   Shares the Instructions expander's shell so the two read as one stack. */
+.optionsPanel { background:rgba(16,23,58,0.55); border:1px solid #2a3566; border-radius:8px; overflow:hidden; }
+.optionsToggle { width:100%; text-align:left; border:none; border-radius:0;
+  background:#16204a; padding:8px 12px; font-weight:600; }
+.optionsToggle:hover { background:#1c2a5e; }
+.optionsBody { display:flex; flex-direction:column; gap:12px; padding:10px 12px; }
+.optionsPanel.collapsed .optionsBody { display:none; }
+.optCheck { display:flex; align-items:center; gap:8px; font-size:13px; color:#e7eef7; cursor:pointer; }
+.optCheck input { width:15px; height:15px; margin:0; accent-color:#4f7cff; cursor:pointer; }
+.optField { display:flex; flex-direction:column; gap:5px; }
+.optLabel { font-size:13px; color:#9fb0d8; }
+.optLabel b { color:#e7eef7; }
+/* The tick marks a range gets from `list=` render below the track, so the input
+   needs the extra height or the notches are clipped off. */
+.qualitySlider { width:100%; height:22px; margin:0; accent-color:#4f7cff; cursor:pointer; }
+.optHint { font-size:11px; color:#66739c; line-height:1.4; min-height:15px; }
+
 /* Instructions expander (inside the menu) */
 .helpPanel { background:rgba(16,23,58,0.55); border:1px solid #2a3566; border-radius:8px; overflow:hidden; }
 .helpToggle { width:100%; text-align:left; border:none; border-radius:0;
