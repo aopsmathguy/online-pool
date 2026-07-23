@@ -38,6 +38,42 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 .menuMsg { min-height:18px; margin-top:12px; color:#ff8a8a; font-size:13px; }
 .bigCode { font-size:44px; font-weight:700; letter-spacing:8px; color:#7ea2ff; margin:10px 0 22px; }
 
+/* ===== Menu background: the demo table ===== */
+/* The main menu sits over a live game between two computer players, seen from
+   the aim view (see startWatching in main.js). The brief is that NOTHING else is
+   on screen — the panel and the 3D scene — so the menu overlay trades its opaque
+   backdrop for a vignette that only darkens enough to keep the panel readable,
+   and every piece of in-game chrome goes away.
+   Hidden here rather than branched in the render loop on purpose: the HUD DOM
+   keeps updating from the spectated game exactly as it does in a real one, and
+   one code path that is sometimes invisible beats two that can drift apart.
+   The lobby overlay keeps its solid backdrop: there is no table behind it. */
+/* Fully transparent — no scrim, no vignette. The scene is the background, shown
+   at full brightness; the only thing tinted is the panel itself. */
+body.menuBg #menu { background:none; }
+/* The panel is see-through as well: the table runs straight under it. Nothing
+   is blurred, so legibility comes from the tint alone — dark enough that white
+   text holds over a bright ball or a rail highlight passing behind it. */
+body.menuBg .panel {
+  background:rgba(14,19,40,0.55);
+  border-color:rgba(126,162,255,0.28);
+  box-shadow:0 20px 60px rgba(0,0,0,0.55);
+}
+/* Fields and the code box sit ON that tint, so they take the same treatment —
+   left solid they read as chips floating on a pane. */
+body.menuBg .panel .field input,
+body.menuBg .panel .field select,
+body.menuBg .panel .codeField { background:rgba(16,23,58,0.55); }
+body.menuBg .players,
+body.menuBg .statusMid,
+body.menuBg .sideMenu,
+body.menuBg .viewBtns,
+body.menuBg .ctrlCluster,
+body.menuBg .placeConfirm,
+body.menuBg .fpsMeter,
+body.menuBg #banner,
+body.menuBg .replayBar { display:none !important; }
+
 /* In-game bot-difficulty slider (lives inside the hamburger menu). */
 #botSkillWrap { display:flex; align-items:center; gap:8px;
   font-size:11px; color:#9fb0d8; font-weight:400; }

@@ -134,7 +134,9 @@ export async function launchPerf({
      * that drew it returns a blank image.
      */
     async screenshot() {
+      await send('Page.enable');   // captureScreenshot hangs without the domain on
       const r = await send('Page.captureScreenshot', { format: 'png' });
+      if (!r.result?.data) throw new Error(`captureScreenshot: ${JSON.stringify(r.error || r)}`);
       return Buffer.from(r.result.data, 'base64');
     },
     errors: () => evaluate(`JSON.stringify(window.__errors)`),

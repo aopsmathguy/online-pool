@@ -11,7 +11,7 @@ import { createRequire } from 'module';
 import { WebSocketServer } from 'ws';
 import { SocketServer } from '../lib/socketUtility.js';
 import {
-  packetSchemas, LOBBY_WAITING, LOBBY_READY, gameIdFromByte, gameByteFromId,
+  packetSchemas, LOBBY_WAITING, LOBBY_READY, gameIdFromByte, gameByteFromId, GAME_8BALL,
 } from '../src/shared/net/packets.js';
 import { SHOT_STRIKE_MS } from '../src/shared/constants.js';
 
@@ -61,6 +61,11 @@ const httpServer = http.createServer((req, res) => {
 // A vs-computer room is an ORDINARY two-seat room: the bot holds seat 1 through
 // a loopback socket and plays as a client (see botClient.js). `room.bot` is only
 // a handle for the difficulty slider -- the game loop knows nothing about it.
+//
+// A room also carries `watchers`: connections with no seat, which receive every
+// broadcast and send nothing that reaches the game. Only the demo table (see
+// ensureDemoRoom) has any, but the plumbing is on every room because it is the
+// broadcast path, not a special case.
 const rooms = new Map();
 const RECONNECT_GRACE_MS = 45_000;
 // Shot retention. The log is the rack's memory, and it serves three things: a
@@ -92,9 +97,14 @@ function makeSeat(conn) {
 }
 function names(room) { return room.seats.map(s => ({ name: s.name || 'Player' })); }
 // Broadcast reaches only seats that currently hold a socket; a dropped player
-// catches up from the shot log when they resume.
+// catches up from the shot log when they resume. Watchers are seatless and have
+// nothing to catch up into, so they simply get whatever is sent while they look.
 function broadcast(room, event, data) {
   for (const s of room.seats) if (s.conn) s.conn.socket.emit(event, data);
+  emitToWatchers(room, event, data);
+}
+function emitToWatchers(room, event, data) {
+  for (const c of room.watchers) c.socket.emit(event, data);
 }
 function opponentOf(conn) { const r = conn.room; return r && r.seats[1 - conn.index]; }
 function emitTo(seat, event, data) { if (seat && seat.conn) seat.conn.socket.emit(event, data); }
@@ -167,7 +177,7 @@ function createRoom(conn, rulesetId, isPublic = false, { announce = true, vsBot 
   const seat = makeSeat(conn);
   const room = {
     code: makeCode(), rulesetId, seats: [seat], sim: null, public: isPublic,
-    shotLog: [], shotIndex: 0,
+    shotLog: [], shotIndex: 0, watchers: new Set(),
   };
   rooms.set(room.code, room);
   conn.room = room; conn.index = 0;
@@ -236,6 +246,7 @@ function performShot(room, playerIdx, params) {
   room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
   trimShotLog(room);
   broadcast(room, 'shotAnim', anim.packet);
+  if (room.demo) maybeRerack(room);   // the demo table never stops on a win
   return true;
 }
 
@@ -243,6 +254,11 @@ function performShot(room, playerIdx, params) {
 // "leave", by a lobby-stage drop, and by dropSeat when the grace runs out.
 function destroyRoom(room, exceptConn) {
   rooms.delete(room.code);
+  // Watchers are told nothing: they hold no seat, so there is no game of theirs
+  // to end. They simply keep showing the last frame until they ask for another
+  // table (see watchDemo) or leave the menu.
+  for (const c of room.watchers) c.watching = null;
+  room.watchers.clear();
   for (const seat of room.seats) {
     if (seat.timer) { clearTimeout(seat.timer); seat.timer = null; }
     const c = seat.conn;
@@ -387,16 +403,18 @@ const socketServer = new SocketServer(wss, { packetSchemas });
 // calling it directly on one end of a loopback pair — see spawnBot. Everything
 // below therefore applies to the bot exactly as it does to a person.
 function handleConnection(socket) {
-  const conn = { socket, name: '', room: null, index: -1 };
+  const conn = { socket, name: '', room: null, index: -1, watching: null };
 
   socket.on('createRoom', ({ name, game }) => {
     if (conn.room) return;
+    unwatch(conn);              // leaving the menu: stop spectating the demo table
     conn.name = name || 'Player';
     createRoom(conn, gameIdFromByte(game));
   });
 
   socket.on('joinRoom', ({ name, code }) => {
     if (conn.room) return;
+    unwatch(conn);
     conn.name = name || 'Player';
     const room = rooms.get((code || '').toUpperCase());
     if (!room) { socket.emit('errorMsg', { message: 'Room not found.' }); return; }
@@ -408,6 +426,7 @@ function handleConnection(socket) {
 
   socket.on('quickPlay', ({ name, game }) => {
     if (conn.room) return;
+    unwatch(conn);
     conn.name = name || 'Player';
     const wantId = gameIdFromByte(game);
     // Match only another quick-play seeker waiting for the SAME game; otherwise
@@ -425,6 +444,7 @@ function handleConnection(socket) {
 
   socket.on('playBot', ({ name, game, skill }) => {
     if (conn.room) return;
+    unwatch(conn);
     conn.name = name || 'Player';
     // A private room the bot immediately fills. `announce: false` skips the
     // "waiting for an opponent" lobby packet — the opponent is already here, and
@@ -443,6 +463,20 @@ function handleConnection(socket) {
     room.bot.setSkill(toSkill(value));
   });
 
+  // Spectate the demo table (the menu's background). Idempotent: asking twice
+  // just re-sends the snapshot.
+  socket.on('watchDemo', () => {
+    if (conn.room) return;              // a seated player is already watching a game
+    unwatch(conn);
+    const room = ensureDemoRoom();
+    conn.watching = room;
+    room.watchers.add(conn);
+    if (demoIdleTimer) { clearTimeout(demoIdleTimer); demoIdleTimer = null; }
+    sendSnapshot(conn, room);
+  });
+
+  socket.on('stopWatch', () => unwatch(conn));
+
   socket.on('newGame', ({ game }) => {
     const room = conn.room;
     if (!room || !room.sim) return;
@@ -454,7 +488,10 @@ function handleConnection(socket) {
     if (!room || !room.sim) return;
     // emitTo, not opp.socket: opponentOf returns a SEAT, which holds `.conn`
     // (and may hold none, if that player is mid-reconnect).
-    if (room.sim.applyAim(conn.index, aim)) emitTo(opponentOf(conn), 'aimState', aim);
+    if (!room.sim.applyAim(conn.index, aim)) return;
+    emitTo(opponentOf(conn), 'aimState', aim);
+    // Watchers are spectating BOTH players, so every aim is one of theirs.
+    emitToWatchers(room, 'aimState', aim);
   });
 
   socket.on('shoot', (params) => {
@@ -491,6 +528,7 @@ function handleConnection(socket) {
   // Reclaim a held seat after a drop/reload, and get replayed what was missed.
   socket.on('resume', ({ token, lastShot }) => {
     if (conn.room) return;
+    unwatch(conn);
     for (const room of rooms.values()) {
       const i = room.seats.findIndex(s => s.token === token);
       if (i < 0) continue;
@@ -518,16 +556,19 @@ function handleConnection(socket) {
   });
 
   socket.on('leaveRoom', () => leaveRoom(conn));
-  socket.on('disconnect', () => handleDisconnect(conn));
+  socket.on('disconnect', () => { unwatch(conn); handleDisconnect(conn); });
   return conn;
 }
 
 socketServer.on('connection', handleConnection);
 
-// Seat the computer opponent in `room`. It gets a loopback socket, goes through
-// handleConnection like any client, and joins by code — so from the server's
-// point of view the room simply fills up and startMatch fires as normal.
-function spawnBot(room, skill) {
+// Seat a computer player. It gets a loopback socket, goes through
+// handleConnection like any client, and then `enter` performs the ordinary
+// action that puts it in a room — so from the server's point of view the room
+// simply fills up and startMatch fires as normal. Returns the bot handle
+// alongside its connection, which is what tells the caller which room it landed
+// in when the bot is the one that opened it.
+function seatBot(skill, enter) {
   const { a: botEnd, b: serverEnd } = createLoopbackPair();
   const botConn = handleConnection(serverEnd);
   const bot = createBotClient({
@@ -536,9 +577,91 @@ function spawnBot(room, skill) {
     isLocked: () => !!botConn.room && replayLocked(botConn.room),
     skill: toSkill(skill),
   });
+  enter(botEnd);
+  return { bot, conn: botConn };
+}
+
+// The computer opponent in a vs-computer room: it joins by code, filling the
+// seat the human left open.
+function spawnBot(room, skill) {
+  const { bot } = seatBot(skill, (s) => s.emit('joinRoom', { name: 'Computer', code: room.code }));
   room.bot = bot;   // handle for the difficulty slider; the game loop ignores it
-  botEnd.emit('joinRoom', { name: 'Computer', code: room.code });
   return bot;
+}
+
+// ---- The demo table (the menu background) -----------------------------------
+// Two computer players at full difficulty, playing 8-ball forever in an ordinary
+// room. Menu clients WATCH it (see the watchDemo handler): they hold no seat, so
+// nothing they can send reaches the game, and one room serves every menu on the
+// server rather than one sim per open tab.
+//
+// It is torn down once nobody is looking. That matters: idle it costs only
+// timers, but a bot pair plays a shot every couple of seconds and each shot runs
+// a full physics simulation to rest — real work to do for an empty gallery.
+const DEMO_SKILL = 100;          // full difficulty (0-100 on the wire, as the slider sends)
+const DEMO_IDLE_MS = 20_000;     // keep the table warm this long after the last watcher
+const DEMO_RERACK_MS = 5000;     // sit on the finished rack this long before starting over
+let demoRoom = null;
+let demoIdleTimer = null;
+
+function ensureDemoRoom() {
+  if (demoRoom && rooms.has(demoRoom.code)) return demoRoom;
+  // The first bot opens the room, the second fills it — the same two calls a
+  // pair of humans makes.
+  const opener = seatBot(DEMO_SKILL, (s) => s.emit('createRoom', { name: 'Computer', game: GAME_8BALL }));
+  demoRoom = opener.conn.room;
+  demoRoom.demo = true;
+  seatBot(DEMO_SKILL, (s) => s.emit('joinRoom', { name: 'Computer 2', code: demoRoom.code }));
+  return demoRoom;
+}
+
+// Detach a spectator, and start the countdown to tearing the table down if that
+// was the last one. Safe to call on a connection that was never watching.
+function unwatch(conn) {
+  const room = conn.watching;
+  if (!room) return;
+  conn.watching = null;
+  room.watchers.delete(conn);
+  if (!room.demo || room.watchers.size) return;
+  clearTimeout(demoIdleTimer);
+  demoIdleTimer = setTimeout(() => {
+    demoIdleTimer = null;
+    if (rooms.get(room.code) !== room || room.watchers.size) return;
+    destroyRoom(room);
+    if (demoRoom === room) demoRoom = null;
+  }, DEMO_IDLE_MS);
+}
+
+// Hand a joining watcher the table as it stands. `startInfo` reports the balls
+// still in play at their CURRENT positions, so a spectator arriving mid-rack
+// builds exactly what is on the felt rather than a fresh rack; `balls` then adds
+// the ones already resting in the cups.
+//
+// Unlike resumeSeat there is no backlog and no shot log to replay: a watcher has
+// missed nothing it is owed. It joins the present, mid-rack, and the next shot
+// it sees is the next one taken.
+function sendSnapshot(conn, room) {
+  const sim = room.sim;
+  if (!sim) return;   // both bots seated but the match has not started yet
+  const info = sim.startInfo();
+  conn.socket.emit('startGame', {
+    game: gameByteFromId(info.game), firstPlayer: info.firstPlayer, layout: info.layout,
+  });
+  conn.socket.emit('balls', sim.ballsFrame());
+  conn.socket.emit('gameState', sim.gameStatePacket());
+  if (sim.phase() === PH_PLACING) conn.socket.emit('placing', sim.placingPacket());
+  // Mid-turn: hand over the pose the shooter's cue is actually in, or the stick
+  // sits at its default until the bot next moves it.
+  if (sim.phase() === PH_AIMING) conn.socket.emit('aimState', sim.currentAim());
+}
+
+// The demo table has nobody to press "New Game", so a finished rack starts
+// itself over. Scheduled off the replay gate so the winning shot has played out
+// on every watcher's screen before the balls reappear.
+function maybeRerack(room) {
+  if (room.sim.gameStatePacket().winner < 0) return;
+  const delay = Math.max(0, room.replayUntil - Date.now()) + DEMO_RERACK_MS;
+  setTimeout(() => { if (rooms.get(room.code) === room) startMatch(room); }, delay);
 }
 
 httpServer.listen(PORT, () => {

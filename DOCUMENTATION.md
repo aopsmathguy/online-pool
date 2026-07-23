@@ -336,6 +336,34 @@ Server → client:
   camera, cue hidden, input gated).
 - Disconnection tears the room down and notifies the opponent.
 
+### Spectators & the demo table (`watchDemo` in `server/index.js`)
+
+A room also carries `watchers`: connections with **no seat**. They receive every
+broadcast (`startGame` / `balls` / `gameState` / `shotAnim`, plus `aimState`, which
+seated players only get for their *opponent*) and can send nothing that reaches the
+game — every play handler requires `conn.room`, which a watcher does not have.
+
+The only room that has any is the **demo table**: two bots at full difficulty
+(`DEMO_SKILL = 100`) playing 8-ball forever, which the client renders as the main
+menu's background (`startWatching` in `main.js`, `body.menuBg` in `styles.css` — aim
+view, no UI, the panel translucent over it). Notes:
+
+- It is an *ordinary* room. One bot opens it with `createRoom`, the other fills it
+  with `joinRoom`; `startMatch` then fires on its own. Nothing about the game loop
+  knows it is a demo.
+- One room serves every menu on the server, not one sim per open tab.
+- A watcher joining mid-rack gets `sendSnapshot`: `startInfo()` reports the balls
+  *still in play at their current positions*, so it builds what is on the felt rather
+  than a fresh rack. There is no backlog — unlike a resuming player, a watcher has
+  missed nothing it is owed.
+- `room.demo` drives `maybeRerack`: a finished rack starts itself over, scheduled off
+  `replayUntil` so the winning shot has played out first.
+- Entering any real room (`createRoom` / `joinRoom` / `quickPlay` / `playBot` /
+  `resume`) detaches the watcher server-side; on the client, `roomJoined` is the one
+  place that clears it. `DEMO_IDLE_MS` after the last watcher leaves, the table is
+  torn down — idle it costs only timers, but a bot pair simulates a shot to rest every
+  couple of seconds, which is real work to do for an empty gallery.
+
 ---
 
 ## 8. The computer opponent (`src/ai.js` + `tickBot` in `server/index.js`)
@@ -417,9 +445,11 @@ trigger, so all rules/physics apply to it identically.
       (`KICK_CLEAR = 1.35×`) and the bounce point must stay off pocket mouths;
    3. the least-bad scratch-risky direct hit, played gently;
    4. a hopeful poke at the nearest legal ball.
-6. **Fallbacks**: on the break, smash the nearest legal ball at full power; with
-   nothing open, poke the nearest (preferably reachable) legal ball at low power as a
-   safety.
+6. **Fallbacks**: on the break, smash the nearest legal ball (the apex) at full power
+   and *dead straight* — the break takes no aim jitter at any difficulty, since there
+   is no pot to miss and a sloppy angle only shrinks the spread; variety comes from
+   the cue-ball placement and the rack's own ~1 mm jitter. With nothing open, poke the
+   nearest (preferably reachable) legal ball at low power as a safety.
 
 `computeBotPlacement(sim)` (ball-in-hand) tries straight-in lineups behind each pot
 line's ghost ball at a few distances, plus up to 64 random in-bounds spots, and of the

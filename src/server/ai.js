@@ -54,7 +54,6 @@ import { POCKET_MOUTHS as POCKETS } from '../shared/pockets.js';
 // many radians, falling off as the square of the remaining difficulty so the
 // error shrinks fastest near the top of the slider and hits exactly 0 there.
 const JITTER_EASIEST_RAD = 0.07;   // difficulty 0: ~4° — misses most pots
-const BREAK_JITTER_SCALE = 1.7;    // the break is always a bit sloppier
 const MAX_POWER = 0.825;        // client's PULLBACK_MAX (see cue.js)
 const MIN_POWER = 0.16;        // never just dribble a ball in
 const CLEAR_FACTOR = 0.99;      // corridor width factor: blocked if a ball sits
@@ -442,10 +441,14 @@ export function computeBotShot(table, difficulty = 0.5) {
     return shot;
   };
 
-  // Break: smash the nearest legal ball (the apex) at full power.
+  // Break: smash the nearest legal ball (the apex) dead straight at full power.
+  // No aim jitter, at any difficulty. The break is the one shot where error buys
+  // nothing — there is no pot to miss, and a sloppy angle only shrinks the
+  // spread. Variety comes from where the cue ball was placed and the rack's own
+  // ~1 mm of jitter, not from the aim.
   if (table.isBreak) {
     const t = nearestLegal(cue, objects, targets, false);
-    if (t) shot.yaw = Math.atan2(t.z - cue.z, t.x - cue.x) + jitter(jRad * BREAK_JITTER_SCALE);
+    if (t) shot.yaw = Math.atan2(t.z - cue.z, t.x - cue.x);
     shot.power = MAX_POWER;
     return legalize();
   }

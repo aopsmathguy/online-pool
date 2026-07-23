@@ -32,6 +32,13 @@ export const packetSchemas = {
   quickPlay:    { name: 'string', game: 'uint8' },
   playBot:      { name: 'string', game: 'uint8', skill: 'uint8' },   // single-player vs the computer (skill 0-100)
   botSkill:     { value: 'uint8' },                  // bot difficulty 0-100 (live-adjustable)
+  // Spectate the demo table — two computer players at full difficulty, playing
+  // forever. The menu renders it as its background. A watcher holds no seat: it
+  // receives the room's broadcasts (startGame / balls / gameState / shotAnim /
+  // aimState, exactly as a player does) and can send nothing that touches the
+  // game. `stopWatch` detaches; so does entering any real room.
+  watchDemo:    {},
+  stopWatch:    {},
   leaveRoom:    {},
   newGame:      { game: 'uint8' },                 // 255 = keep current ruleset
   aim:          { yaw: 'float32', pitch: 'float32', strikeX: 'float32', strikeY: 'float32', pullback: 'float32' },
