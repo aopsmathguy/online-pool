@@ -243,7 +243,7 @@ function showGame()  { show('menu', false); show('lobby', false); net.inGame = t
 
 // ---- Menu background: the demo table ----------------------------------------
 // The main menu renders over a live game between two computer players, seen from
-// the aim view with nothing else on screen.
+// the overhead view with nothing else on screen.
 //
 // It needs no separate client: the server sends a spectator the SAME packets it
 // sends a player (startGame / balls / gameState / shotAnim / aimState — see the
@@ -860,9 +860,10 @@ function loop(now) {
   // behind your back. Overhead used to be forced while placing, spectating and
   // at game-over, which meant the view moved on you every time the turn did.
   // The menu background is the exception, and not really one: it is scenery, not
-  // a game, so it is pinned to the aim view and leaves camPref alone for when
-  // there IS a game.
-  const view = net.watching ? 'aim' : camPref;
+  // a game, so it is pinned to the overhead view (the whole table reads as a
+  // backdrop; sighting down someone else's stick does not) and leaves camPref
+  // alone for when there IS a game.
+  const view = net.watching ? 'top' : camPref;
   setViewMode(view);
   setCueVisible(interact === PH_AIMING || drawingBack());
 
