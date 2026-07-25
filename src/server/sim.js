@@ -13,7 +13,7 @@ import {
   tableW, tableH, FIXED_DT, R, g, RACK_QUAT,
 } from '../shared/constants.js';
 import {
-  setBodyFilter, stepAndDamp, tmpVec3, AmmoLib,
+  setBodyFilter, stepAndApplyFriction, tmpVec3, AmmoLib,
   CG_BALL, CG_SUNK,
   MASK_BALL_NORMAL, MASK_BALL_OFF_FELT, MASK_SUNK,
 } from './physics.js';
@@ -114,7 +114,7 @@ export class RoomSim {
   settleRack() {
     const SETTLE_MIN = 0.1, SETTLE_MAX = 2.0;
     for (let t = 0; t < SETTLE_MAX; t += FIXED_DT) {
-      stepAndDamp(this.world, this.balls, FIXED_DT);
+      stepAndApplyFriction(this.world, this.balls, FIXED_DT);
       if (t >= SETTLE_MIN && this.ballsAtRest()) break;
     }
     const q = new AmmoLib.btQuaternion(RACK_QUAT.x, RACK_QUAT.y, RACK_QUAT.z, RACK_QUAT.w);
@@ -216,7 +216,9 @@ export class RoomSim {
     const removals = [];
     let simT = 0, frameAcc = 0, settled = false;
     while (simT < MAX_SHOT_SECONDS) {
-      stepAndDamp(this.world, this.balls, FIXED_DT);
+      // Pass `sunk` too so balls resting in a cup get its (grippier) friction and
+      // settle; they collide only with the cup and each other, never in play.
+      stepAndApplyFriction(this.world, this.balls, FIXED_DT, this.sunk);
       this.scanContacts();
       // Pocket handling runs EVERY substep, not once per keyframe. Both are
       // physics questions and neither has anything to do with how often the
@@ -404,6 +406,10 @@ export class RoomSim {
     const i = this.balls.indexOf(b);
     if (i >= 0) this.balls.splice(i, 1);
     b.sunk = true;
+    // Frictionless in Bullet like every body, but the analytic pass now rubs it
+    // against the cup (SURF_CUP) — runShotAndRecord passes `sunk` to
+    // stepAndApplyFriction — so it settles instead of sliding forever. It now
+    // collides only with the cup and other sunk balls (MASK_SUNK).
     setBodyFilter(this.world, b.body, CG_SUNK, MASK_SUNK);
     this.sunk.push(b);
     this.rebuildBallPtrMap();   // its ptr must no longer count as a live ball

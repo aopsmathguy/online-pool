@@ -2,7 +2,7 @@
 // Ammo only, no Three. Each builder takes the target `world` so a room can
 // build its own table. Ported verbatim from the physics halves of the old
 // geometry.js (the mesh halves stay in geometry.js for the client).
-import { mu_wall, e_rail, mu_ground, e_table, pocketWireY } from '../shared/constants.js';
+import { e_rail, e_table, pocketWireY } from '../shared/constants.js';
 import { AmmoLib, createRigidBody } from './physics.js';
 import { triangulate } from '../shared/triangulate.js';
 import { table_parts, rail_solid } from '../shared/table.js';
@@ -14,7 +14,7 @@ import { table_parts, rail_solid } from '../shared/table.js';
 // it into the felt-mesh collision group).
 export function createFeltMesh(world, feltPts, y = 0, opts = {}) {
   const Ammo = AmmoLib;
-  const mu = opts.mu ?? mu_ground;
+  const mu = opts.mu ?? 0;           // frictionless — friction is analytic (physics.js)
   const e  = opts.e  ?? e_table;
 
   const tris = triangulate(feltPts);
@@ -81,7 +81,7 @@ function addPolylineCapsules(Ammo, compound, pointsXZ, wireR, wireY, margin) {
 // lands on that 45 deg nose edge — the same line the old wire ran along.
 export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = {}) {
   const Ammo = AmmoLib;
-  const mu = opts.mu ?? mu_wall;     // tangential friction vs balls
+  const mu = opts.mu ?? 0;           // frictionless — friction is analytic (physics.js)
   const e  = opts.e  ?? e_rail;      // restitution vs balls
   const margin = opts.margin ?? 0.001;
 
@@ -126,7 +126,7 @@ export function createCylindricalCup(world, radius, height, opts = {}) {
   const wall     = opts.wall     ?? 0.01;
   const base     = opts.base     ?? wall;
   const segments = opts.segments ?? 32;
-  const mu       = opts.mu       ?? mu_wall;
+  const mu       = opts.mu       ?? 0;
   const e        = opts.e        ?? e_rail;
   const margin   = opts.margin   ?? 0.001;
   const pos      = opts.pos      ?? { x: 0, y: 0, z: 0 };

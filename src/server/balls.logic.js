@@ -2,10 +2,10 @@
 // Everything is parameterized by (world, balls) so the server can run many
 // tables at once. A "ball" here is { body, number, style, color, offFelt }.
 // The client mirrors these as meshes in balls.view.js keyed by the same id/index.
-import { R, m, mu_ball, e_ball, RACK_QUAT } from '../shared/constants.js';
+import { R, m, e_ball, RACK_QUAT } from '../shared/constants.js';
 import {
   AmmoLib, tmpTransform, tmpVec3, createRigidBody, setBodyFilter,
-  CG_BALL, MASK_BALL_NORMAL,
+  CG_BALL, MASK_BALL_NORMAL, SURF_BALL,
 } from './physics.js';
 import { BALL_COLORS, ballStyle } from '../shared/balldefs.js';
 
@@ -36,12 +36,14 @@ export function resetRack(world, balls, layout) {
       shape: sphere,
       pos: { x: x + jitter*(Math.random()-0.5), y: lift, z: z + jitter*(Math.random()-0.5) },
       quat: RACK_QUAT,
-      fric: mu_ball, rest: e_ball, rollF: 0, spinF: 0, linD: 0, angD: 0,
+      // Frictionless in Bullet — all tangential friction is resolved analytically
+      // in physics.js (applyFriction). Bullet does only the normal collision.
+      fric: 0, rest: e_ball, rollF: 0, spinF: 0, linD: 0, angD: 0,
       group: CG_BALL, mask: MASK_BALL_NORMAL,
     });
-    body.setUserIndex(1);
+    body.setUserIndex(SURF_BALL);
     body.setCcdSweptSphereRadius(R * 0.9);
-    body.setCcdMotionThreshold(R * 0.1);
+    body.setCcdMotionThreshold(R * 0.02);
     body.setSleepingThresholds(0.0002, 0.0002);
     body.setContactProcessingThreshold(0.);
 
