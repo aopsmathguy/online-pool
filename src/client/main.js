@@ -11,7 +11,7 @@ import { table_top_outline, point_in_outline } from '../shared/table.js';
 import {
   rail_pts, felt_pts, pocket_positions,
   makeTableRails, makePlanarMeshFromPolyline, makeCylindricalCupMesh, makeTableCabinet,
-  makeTableSights,
+  makeTableSights, setClothBlue,
 } from './geometry.js';
 import {
   initCueStick, updateCueAndCamera, updateCueStick, placeCamera,
@@ -469,6 +469,7 @@ socket.on('lobby', ({ state, players }) => {
 
 socket.on('startGame', ({ game, layout }) => {
   buildScene();
+  setClothBlue(game === GAME_9BALL);   // 9-ball plays on blue cloth
   resetTopPan();             // recenter overhead for the new game
   // Pocketed-column length. Taken from the ruleset, NOT from the layout's
   // highest number: a resume rebuilds the rack from the balls still on the

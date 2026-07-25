@@ -269,8 +269,28 @@ function downscaleImage(img, maxPx) {
 let feltTextures = null, woodTextures = null;
 const feltMaterials = new Set(), woodMaterials = new Set();
 
+// 9-ball is played on blue cloth. The scanned baize is green, so instead of
+// shipping a second texture set we recolour it in the shader (see applyFelt).
+let clothBlue = false;
+// Flip the cloth green<->blue and repaint every live felt material. Called per
+// game (the scene is built once and reused, so the material persists across a
+// switch between rulesets). No-op before any felt exists — newly built felt then
+// picks up the flag on its own.
+export function setClothBlue(on) {
+      const next = !!on;
+      if (next === clothBlue) return;
+      clothBlue = next;
+      for (const mat of feltMaterials) applyFelt(mat);
+}
+
 const feltSet = () => (feltTextures ||= buildTextureSet(FELT_MAPS, FELT_REPEAT));
 const woodSet = () => (woodTextures ||= buildTextureSet(WOOD_MAPS, WOOD_REPEAT));
+// 9-ball's blue baize: only the colour map differs (hue-rotated from the green
+// scan by scripts/make_blue_felt.py), so it is memoised on its own and reuses
+// the green set's normal/roughness — the weave and nap are identical cloth.
+const FELT_BLUE_MAPS = { map: '/assets/felt/color2.jpg' };
+let feltBlueTextures = null;
+const feltBlueMap = () => (feltBlueTextures ||= buildTextureSet(FELT_BLUE_MAPS, FELT_REPEAT)).map;
 
 // Dress a material as baize. The photo IS the colour, so the material tints
 // white — a green base here would multiply the green twice and turn the cloth
@@ -279,6 +299,9 @@ function applyFelt(mat) {
       feltMaterials.add(mat);
       const set = feltSet();
       for (const slot of TEX_SLOTS) mat[slot] = set[slot] || null;
+      // 9-ball plays on blue cloth: swap in the hue-rotated colour map. Normal
+      // and roughness stay the green set's — same weave, only the colour changes.
+      if (clothBlue) mat.map = feltBlueMap();
       mat.color.set(0xffffff);
       mat.metalness = 0.0;
       // roughnessMap MULTIPLIES this, so 1.0 is "let the map decide". With no
@@ -308,10 +331,10 @@ function applyWood(mat) {
 // ever built from them. The old textures are disposed rather than dropped —
 // they are the megabytes the lower preset was asked to reclaim.
 onQualityChange(() => {
-      for (const set of [feltTextures, woodTextures]) {
+      for (const set of [feltTextures, woodTextures, feltBlueTextures]) {
         if (set) for (const tex of Object.values(set)) tex.dispose();
       }
-      feltTextures = woodTextures = null;
+      feltTextures = woodTextures = feltBlueTextures = null;
       for (const mat of feltMaterials) applyFelt(mat);
       for (const mat of woodMaterials) applyWood(mat);
 });

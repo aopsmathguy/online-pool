@@ -51,19 +51,39 @@ button { background:#10173a; border:1px solid #2a3566; color:#e7eef7; padding:6p
 /* Fully transparent — no scrim, no vignette. The scene is the background, shown
    at full brightness; the only thing tinted is the panel itself. */
 body.menuBg #menu { background:none; }
-/* The panel is see-through as well: the table runs straight under it. Nothing
-   is blurred, so legibility comes from the tint alone — dark enough that white
-   text holds over a bright ball or a rail highlight passing behind it. */
+/* The panel is see-through as well: the table runs straight under it. Pushed
+   further now — the tint is light enough that legibility comes from a soft
+   backdrop blur rather than the tint alone, so white text still holds over a
+   bright ball or a rail highlight passing behind it. */
 body.menuBg .panel {
-  background:rgba(14,19,40,0.55);
+  background:rgba(14,19,40,0.38);
   border-color:rgba(126,162,255,0.28);
   box-shadow:0 20px 60px rgba(0,0,0,0.55);
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
 }
-/* Fields and the code box sit ON that tint, so they take the same treatment —
-   left solid they read as chips floating on a pane. */
+/* Fields and the code box sit ON that tint, so they take the same treatment. */
 body.menuBg .panel .field input,
 body.menuBg .panel .field select,
-body.menuBg .panel .codeField { background:rgba(16,23,58,0.55); }
+body.menuBg .panel .codeField { background:rgba(16,23,58,0.40); }
+/* Buttons go the MOST transparent — glass chips over the live table rather than
+   solid blocks. Their own light blur keeps the labels readable, and hover/press
+   firm the tint up for feedback. */
+body.menuBg .panel button {
+  background:rgba(16,23,58,0.26);
+  border-color:rgba(126,162,255,0.32);
+  backdrop-filter:blur(2px);
+  -webkit-backdrop-filter:blur(2px);
+}
+body.menuBg .panel button:hover { background:rgba(36,52,110,0.50); }
+/* The primary actions keep their blue identity, just translucent. */
+body.menuBg #btnCreate,
+body.menuBg #btnQuick {
+  background:rgba(40,64,143,0.32);
+  border-color:rgba(74,106,223,0.60);
+}
+body.menuBg #btnCreate:hover,
+body.menuBg #btnQuick:hover { background:rgba(48,80,175,0.56); }
 body.menuBg .players,
 body.menuBg .statusMid,
 body.menuBg .sideMenu,
