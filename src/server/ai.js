@@ -155,7 +155,20 @@ function evalPot(cue, t, p, objects) {
   const ox1 = unit(x1.x - O.x, x1.z - O.z);
   const ox2 = unit(x2.x - O.x, x2.z - O.z);
   if (!ox1 || !ox2) return null;
-  const theta3 = angleU(ox1, ox2);
+  // θ3 is SIGNED. angleU (acos) only ever gives |θ3|, so an inverted window —
+  // where the two jaw-clearance directions have crossed and no object-ball
+  // direction actually drops — would still read as a positive, open window.
+  // Orient the window by the mouth as seen from O (sweep O→p1 → O→p2): a valid
+  // pot sweeps O→x1 → O→x2 the same way. When it sweeps the other way the pot is
+  // impossible and θ3 comes out negative, which the `ease > 0` gate then rejects.
+  const op1 = unit(p1.x - O.x, p1.z - O.z);
+  const op2 = unit(p2.x - O.x, p2.z - O.z);
+  if (!op1 || !op2) return null;
+  const refSign = Math.sign(op1.x * op2.z - op1.z * op2.x);
+  const theta3 = refSign * Math.atan2(
+    ox1.x * ox2.z - ox1.z * ox2.x,   // cross(ox1, ox2)
+    ox1.x * ox2.x + ox1.z * ox2.z,   // dot(ox1, ox2)
+  );
 
   // Desired object-ball direction. If the ball is past the mouth line (pocket
   // side, (O−mouth)·n > 0 since n points toward the pocket), roll it in straight

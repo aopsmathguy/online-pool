@@ -3,7 +3,7 @@ export const tableW = 2.24, tableH = 1.12;
 export const R = 0.028575, m = 0.170097, g = 9.81;
 
 export const e_ball  = Math.sqrt(0.95);   // ball·ball combine = 0.95
-export const e_rail  = 0.98 / e_ball;      // ball·rail combine = 0.85
+export const e_rail  = 0.98 / e_ball;      // ball·rail combine = 0.98
 export const e_table = 0.6 / e_ball;
 export const e_pocket = 0.2/e_ball;
 
@@ -12,7 +12,7 @@ export const e_pocket = 0.2/e_ball;
 // sliding behaviour matches what Bullet used to apply.
 export const mu_felt_kinetic = 0.20;   // cloth slide→roll friction (was mu_ball·mu_ground)
 export const mu_rail_kinetic = 0.14;   // rail tangential friction
-export const mu_cup_kinetic  = 0.30;   // pocket-cup slide friction (plastic/rubber, grippier
+export const mu_cup_kinetic  = 0.10;   // pocket-cup slide friction (plastic/rubber, grippier
                                        // than cloth) — bleeds off a ball rattling in the cup
 
 // Ball–ball dynamic friction FALLS with the relative tangential surface speed s
