@@ -7,7 +7,7 @@
 // are shared scratch, which is safe because the server steps one world fully
 // before touching another (single-threaded, no re-entrancy).
 import {
-  g, m, R, e_ball, e_rail, FIXED_DT, C_rr, C_spin,
+  g, m, R, FIXED_DT, C_rr, C_spin,
   mu_felt_kinetic, mu_rail_kinetic, mu_cup_kinetic,
   mu_ball_asym, mu_ball_amp, mu_ball_decay,
 } from '../shared/constants.js';
@@ -119,23 +119,48 @@ const frictionBallByPtr = new Map();
 // --- Analytic friction ------------------------------------------------------
 // Every tangential friction in the sim is resolved HERE, not by Bullet: all
 // bodies are built frictionless, so Bullet does only the normal collision
-// response (restitution). This one pass covers three kinds of contact:
+// response (restitution). There is ONE rule and no contact modes: at every
+// touching contact point, every step, charge a Coulomb tangential impulse
+// against the normal impulse the solver reports for that point. Resting,
+// rolling and bouncing are the same code — a bounce is just a step where the
+// reported impulse is large.
 //
-//   ball–felt  continuous, weight-loaded: kinetic friction spins a sliding
-//              ball up to rolling, then rolling resistance + spin decay.
-//   ball–ball  impulsive: the collision friction that THROWS the object ball,
-//              with a coefficient that falls with the relative surface speed —
-//              so soft shots throw more than firm ones.
-//   ball–rail  impulsive: cushion tangential friction on a rebound.
+// What differs between surfaces is COEFFICIENTS ONLY (the table below): a
+// cushion is a surface whose rolling and spin coefficients are zero, not a
+// surface with special handling. The one genuine split is ball–ball, where
+// there is a second dynamic body to push back on, so the impulse is equal and
+// opposite and the gearing cap is the two-body one.
 //
 // A solid sphere has I = (2/5) m R², so a tangential impulse J at the contact
 // changes the contact-point velocity by (7/2)(J/m) (linear J/m + the angular
 // (5/2)(J/m)); "gearing" (killing the slip) therefore needs J = (2/7) m·|slip|.
 const BALL_I = (2 / 5) * m * R * R;
 
-const SLIP_EPS = 0.005;   // m/s: contact slip below this counts as pure rolling
-const COLL_EPS = 0.02;    // m/s: separating normal speed a real bounce must exceed
+const SLIP_EPS = 0.001;   // m/s: contact slip below this counts as pure rolling
 const VT_EPS   = 1e-9;
+
+// --- The surface table ------------------------------------------------------
+// EVERYTHING the friction pass needs to know about a surface lives here, keyed
+// by the SURF_* id that surface's bodies carry on their Bullet user index.
+// Adding a surface a ball can collide with is ONE ENTRY here plus a CG_* group
+// and a setUserIndex() at construction — no branch below changes, and nothing
+// else in this file mentions felt, rail or cup by name.
+//
+//   mu      kinetic coefficient for the slide->roll conversion.
+//   c_rr    rolling resistance, once the contact is rolling rather than sliding.
+//   c_spin  decay of spin about the contact normal.
+//
+// All three are per-surface, so a new surface can be slippier or grabbier
+// without touching the cloth's calibration. Restitution is NOT here: it is
+// Bullet's, set on the body at construction, and this pass never needs it.
+const SURFACES = {
+  [SURF_FELT]: { mu: mu_felt_kinetic, c_rr: C_rr, c_spin: C_spin },
+  [SURF_CUP]:  { mu: mu_cup_kinetic,  c_rr: C_rr, c_spin: C_spin },
+  // A cushion is a bounce, not a resting place: a ball never rolls along one or
+  // sits spinning on one, so rolling resistance and spin decay are zero. That is
+  // a COEFFICIENT being zero, not a different code path.
+  [SURF_RAIL]: { mu: mu_rail_kinetic, c_rr: 0, c_spin: 0 },
+};
 
 // Cross product a × b, returned as a 3-tuple via the caller's out array.
 function cross(ax, ay, az, bx, by, bz, out) {
@@ -145,6 +170,52 @@ function cross(ax, ay, az, bx, by, bz, out) {
   return out;
 }
 const _cp = [0, 0, 0];
+const _ut = [0, 0, 0];   // tangential slip, kept separate from _cp so the two never alias
+
+// --- Shared contact primitives ----------------------------------------------
+// The three friction paths below (felt/cup, rail, ball–ball) differ in WHEN they
+// fire and in what supplies Jn, but they all do the same three things once they
+// do fire: find the tangential slip at the contact, cap a Coulomb impulse at the
+// value that exactly kills that slip, and apply it at r = ±R·n̂. Those three
+// steps live here so the coefficient and the cap are stated once each.
+
+
+
+// Strip the normal component, leaving the tangential part in `out`. Returns |t|.
+function tangential(ax, ay, az, nx, ny, nz, out) {
+  const an = ax * nx + ay * ny + az * nz;
+  out[0] = ax - an * nx; out[1] = ay - an * ny; out[2] = az - an * nz;
+  return Math.hypot(out[0], out[1], out[2]);
+}
+
+// Slip of a ball's contact point against a surface whose normal is n̂ (pointing
+// SURFACE -> BALL): u = v + ω × r with r = −R·n̂. Tangential part into `out`.
+function contactSlip(vx, vy, vz, wx, wy, wz, nx, ny, nz, out) {
+  cross(wx, wy, wz, -R * nx, -R * ny, -R * nz, _cp);
+  return tangential(vx + _cp[0], vy + _cp[1], vz + _cp[2], nx, ny, nz, out);
+}
+
+// Coulomb tangential impulse magnitude μ·Jn, capped at the GEARING impulse that
+// brings the contact to pure rolling — friction can kill the slip but must never
+// reverse it. A tangential impulse J at the contact changes the contact-point
+// velocity by (7/2)(J/m) for one ball against an immovable surface, so the cap is
+// (2/7)m·uT; two equal balls each take half of it, hence m/7 (see applyThrow).
+const CAP_SURFACE = (2 / 7) * m;
+const CAP_BALL    = m / 7;
+function gearedJ(mu, Jn, uT, cap) { return Math.min(mu * Jn, cap * uT); }
+
+// Add a tangential impulse (jx,jy,jz) at contact offset r=(rx,ry,rz) from the
+// centre: linear J/m, angular (r × J)/I. Read-modify-write via setVelocity so
+// the change is exactly Δv/Δω (no dependence on Bullet's impulse bookkeeping).
+function applyImpulse(body, jx, jy, jz, rx, ry, rz) {
+  const v = body.getLinearVelocity();
+  tmpVec3.setValue(v.x() + jx / m, v.y() + jy / m, v.z() + jz / m);
+  body.setLinearVelocity(tmpVec3);
+  const w = body.getAngularVelocity();
+  cross(rx, ry, rz, jx, jy, jz, _cp);
+  tmpVec3.setValue(w.x() + _cp[0] / BALL_I, w.y() + _cp[1] / BALL_I, w.z() + _cp[2] / BALL_I);
+  body.setAngularVelocity(tmpVec3);
+}
 
 // Ball–ball dynamic friction, falling with the relative tangential surface speed
 // at contact — the empirical clean-ball fit (see constants.js):
@@ -155,13 +226,6 @@ function ballBallMu(vRelT) {
   const s = vRelT > 0 ? vRelT : 0;
   return mu_ball_asym + mu_ball_amp * Math.exp(-mu_ball_decay * s);
 }
-
-// Separating-normal-speed of the previous pass, keyed by the two body ptrs, so
-// an IMPULSIVE friction (ball–ball, ball–rail) fires exactly once — on the step
-// the pair first separates — instead of every step the (lingering) manifold
-// survives. Rebuilt each pass from the live manifolds so stale pairs drop out.
-let impulsivePrevVN = new Map();
-const pairKey = (a, b) => (a < b ? a * 2654435761 + b : b * 2654435761 + a);
 
 export function stepAndApplyFriction(world, balls, dt=FIXED_DT, sunk=null) {
   world.stepSimulation(dt, 8, dt);
@@ -177,7 +241,6 @@ function applyFriction(world, balls, sunk=null) {
   frictionBallByPtr.clear();
   for (const b of balls) frictionBallByPtr.set(b.body.ptr, b);
   if (sunk) for (const b of sunk) frictionBallByPtr.set(b.body.ptr, b);
-  const nextVN = new Map();
 
   const disp = world.getDispatcher();
   const nMani = disp.getNumManifolds();
@@ -190,73 +253,62 @@ function applyFriction(world, balls, sunk=null) {
     const ballA = frictionBallByPtr.get(bodyA.ptr);
     const ballB = frictionBallByPtr.get(bodyB.ptr);
 
-    // Ball–ball: impulsive, velocity-dependent throw.
+    // Every contact is handled the same way: walk the manifold's TOUCHING points
+    // and charge friction at each, against that point's own normal and the
+    // solver's own normal impulse for that point, every step. The only thing
+    // that varies is the coefficients and whether there is a second body to
+    // push back on.
+    //
+    // The distance gate is what makes iterating all points SAFE. Bullet caches
+    // up to 4 points per manifold, but only touching ones have distance <= 0;
+    // the stale separated points keep reporting their last applied impulse (a
+    // 9.8*m*g spike a step after the ball has lifted off), and including them
+    // multiplies the load by the cache depth. Gating drops them, so the
+    // surviving per-point impulses sum to the true support — verified to
+    // average exactly m*g for resting AND bouncing balls (friction.test.js).
+    //
+    // Ball–ball: both sides are dynamic, so the impulse is equal and opposite
+    // and the gearing cap is the two-body one. Its mu falls with slip speed.
     if (ballA && ballB) {
-      const key = pairKey(bodyA.ptr, bodyB.ptr);
-      const vN = applyBallBall(ballA, ballB, impulsivePrevVN.get(key));
-      nextVN.set(key, vN);
+      for (let j = 0; j < nc; j++) {
+        const cp = mani.getContactPoint(j);
+        if (cp.getDistance() > 0) continue;
+        const Jn = cp.getAppliedImpulse();
+        if (Jn <= 0) continue;
+        // normalWorldOnB runs B -> A; negate for n̂ running A -> B.
+        const nrm = cp.get_m_normalWorldOnB();
+        applyThrow(ballA, ballB, -nrm.x(), -nrm.y(), -nrm.z(), Jn);
+      }
       continue;
     }
+
     const ball = ballA || ballB;
     if (!ball) continue;                         // e.g. a sunk ball: not ours
     const ballIsA = !!ballA;
-    const surf = ballIsA ? bodyB : bodyA;
-    const kind = surf.getUserIndex();
-    if (kind !== SURF_FELT && kind !== SURF_RAIL && kind !== SURF_CUP) continue;
+    // One table lookup decides everything: an id with no entry is a body a ball
+    // passes through as far as friction is concerned.
+    const surface = SURFACES[(ballIsA ? bodyB : bodyA).getUserIndex()];
+    if (!surface) continue;
 
     // m_normalWorldOnB points from body B into body A; flip it when the ball is
     // B so n̂ always runs SURFACE -> BALL (straight up, on flat felt).
     const s = ballIsA ? 1 : -1;
 
-    if (kind === SURF_FELT || kind === SURF_CUP) {
-      // Continuous, weight-loaded contact (cup just grippier). Rub EVERY point
-      // that is actually touching — distance <= 0 — each with its OWN normal and
-      // its OWN solver normal impulse. Per-point, not one deepest point, because:
-      //
-      //   * Distinct simultaneous contacts on the same body need distinct
-      //     friction: a ball rattling in a cup touches the floor AND a wall, with
-      //     different normals, and each must rub. Likewise a ball wedged in a
-      //     corner. Collapsing to the deepest point drops the others.
-      //
-      //   * The distance gate is what makes iterating all points SAFE. Bullet
-      //     caches up to 4 points for a sphere on a plane, but only the touching
-      //     one has distance <= 0; the stale separated cache points keep reporting
-      //     their last applied impulse (e.g. a 9.8·m·g spike a step after the ball
-      //     has lifted off), and including them multiplied the load by the cache
-      //     depth. Gating drops them, so the surviving per-point impulses sum to
-      //     the true m·g support — verified to average exactly m·g under hard
-      //     drops and rolls at every speed, vs 1.5–1.9× ungated.
-      const mu = kind === SURF_CUP ? mu_cup_kinetic : mu_felt_kinetic;
-      for (let j = 0; j < nc; j++) {
-        const cp = mani.getContactPoint(j);
-        if (cp.getDistance() > 0) continue;         // separated cache point: stale impulse
-        const Jn = cp.getAppliedImpulse();
-        if (Jn <= 0) continue;
-        const nrm = cp.get_m_normalWorldOnB();
-        applyFelt(ball, s * nrm.x(), s * nrm.y(), s * nrm.z(), Jn, mu);
-      }
-    } else {
-      // Rail: impulsive cushion rebound, fired once per separation. One normal per
-      // manifold, taken from the deepest point.
-      let deepest = 0, minDist = Infinity;
-      for (let j = 0; j < nc; j++) {
-        const d = mani.getContactPoint(j).getDistance();
-        if (d < minDist) { minDist = d; deepest = j; }
-      }
-      const normal = mani.getContactPoint(deepest).get_m_normalWorldOnB();
-      const key = pairKey(bodyA.ptr, bodyB.ptr);
-      const vN = applyRail(ball, s * normal.x(), s * normal.y(), s * normal.z(),
-                           impulsivePrevVN.get(key));
-      nextVN.set(key, vN);
+    for (let j = 0; j < nc; j++) {
+      const cp = mani.getContactPoint(j);
+      if (cp.getDistance() > 0) continue;
+      const Jn = cp.getAppliedImpulse();
+      if (Jn <= 0) continue;
+      const nrm = cp.get_m_normalWorldOnB();
+      applySurface(ball, s * nrm.x(), s * nrm.y(), s * nrm.z(), Jn, surface);
     }
   }
-  impulsivePrevVN = nextVN;
 }
 
-// Ball on the cloth. Jn is Bullet's reported normal impulse over this step,
-// summed over the manifold's cached contact points. Every friction below —
-// slide→roll, rolling resistance, spin decay — scales with it.
-function applyFelt(ball, nx, ny, nz, Jn, mu=mu_felt_kinetic) {
+// One touching point against a static surface. Jn is the solver's normal impulse
+// at that point; every friction below — slide→roll, rolling resistance, spin
+// decay — scales with it, and takes its coefficients from `surface`.
+function applySurface(ball, nx, ny, nz, Jn, surface) {
   if (Jn <= 0) return;
   const body = ball.body;
   const v = body.getLinearVelocity();
@@ -264,32 +316,31 @@ function applyFelt(ball, nx, ny, nz, Jn, mu=mu_felt_kinetic) {
   const w = body.getAngularVelocity();
   let wx = w.x(), wy = w.y(), wz = w.z();
 
-  // Contact-point slip u = v + ω × r, r = −R·n̂ (contact is R below the centre).
-  cross(wx, wy, wz, -R * nx, -R * ny, -R * nz, _cp);
-  const ux = vx + _cp[0], uy = vy + _cp[1], uz = vz + _cp[2];
-  const un = ux * nx + uy * ny + uz * nz;
-  const utx = ux - un * nx, uty = uy - un * ny, utz = uz - un * nz;
-  const uT = Math.hypot(utx, uty, utz);
+  const uT = contactSlip(vx, vy, vz, wx, wy, wz, nx, ny, nz, _ut);
+  const utx = _ut[0], uty = _ut[1], utz = _ut[2];
 
   if (uT > SLIP_EPS) {
     // SLIDING: kinetic friction opposing the slip, capped at the gearing impulse
     // so it can bring the ball to rolling but never reverse the slip. This is
     // the slide→roll conversion that gives follow/draw/stun their behaviour.
-    const J = Math.min(mu * Jn, (2 / 7) * m * uT);
+    // Applied to the LOCAL scalars rather than via applyImpulse: the two blocks
+    // below keep mutating the same v/ω, and only the tail writes them back, so
+    // one contact point costs one read and one write however many terms fire.
+    const J = gearedJ(surface.mu, Jn, uT, CAP_SURFACE);
     const jx = -J * utx / uT, jy = -J * uty / uT, jz = -J * utz / uT;
     vx += jx / m; vy += jy / m; vz += jz / m;
     cross(-R * nx, -R * ny, -R * nz, jx, jy, jz, _cp);   // angular impulse r × J
     wx += _cp[0] / BALL_I; wy += _cp[1] / BALL_I; wz += _cp[2] / BALL_I;
   } else {
     // ROLLING: rolling resistance as a rigid rolling body of inertia (7/5)m, so
-    // the OBSERVED linear deceleration is (5/7)·C_rr·g (matching the old Bullet-
+    // the OBSERVED linear deceleration is (5/7)·c_rr·g (matching the old Bullet-
     // coupled rate the calibration tests pin). Then re-project the spin to exact
     // rolling for the new velocity, preserving spin about the normal.
     const vn = vx * nx + vy * ny + vz * nz;
     let vtx = vx - vn * nx, vty = vy - vn * ny, vtz = vz - vn * nz;
     const vtMag = Math.hypot(vtx, vty, vtz);
     if (vtMag > VT_EPS) {
-      const dvMag = Math.min((5 / 7) * C_rr * Jn / m, vtMag);
+      const dvMag = Math.min((5 / 7) * surface.c_rr * Jn / m, vtMag);
       const k = dvMag / vtMag;
       vx -= vtx * k; vy -= vty * k; vz -= vtz * k;
     }
@@ -306,7 +357,7 @@ function applyFelt(ball, nx, ny, nz, Jn, mu=mu_felt_kinetic) {
   const wn = wx * nx + wy * ny + wz * nz;
   const wnAbs = Math.abs(wn);
   if (wnAbs > 1e-9) {
-    const dw = Math.min((5 * C_spin * Jn) / (2 * m * R), wnAbs);
+    const dw = Math.min((5 * surface.c_spin * Jn) / (2 * m * R), wnAbs);
     const k = Math.sign(wn) * dw;
     wx -= k * nx; wy -= k * ny; wz -= k * nz;
   }
@@ -321,29 +372,20 @@ function applyFelt(ball, nx, ny, nz, Jn, mu=mu_felt_kinetic) {
 // collision's normal impulse analytically and apply the tangential (throw)
 // impulse once, on the step the pair first separates. Returns the current
 // separating normal speed for the caller's once-only bookkeeping.
-function applyBallBall(a, b, prevVN) {
+//
+
+
+// One touching point's worth of ball–ball throw: the tangential impulse at the
+// contact, equal and opposite on the two balls. Re-reads both velocities so a
+// second point (if one ever existed) would see the first point's result.
+function applyThrow(a, b, nx, ny, nz, Jn) {
   // Extract every Ammo vector to scalars IMMEDIATELY: getters can hand back a
   // shared internal temp, so holding two live references across another getter
   // is unsafe.
-  const oa = a.body.getWorldTransform().getOrigin();
-  const pax = oa.x(), pay = oa.y(), paz = oa.z();
-  const ob = b.body.getWorldTransform().getOrigin();
-  const pbx = ob.x(), pby = ob.y(), pbz = ob.z();
-  let nx = pbx - pax, ny = pby - pay, nz = pbz - paz;
-  const nl = Math.hypot(nx, ny, nz) || 1;
-  nx /= nl; ny /= nl; nz /= nl;                          // n̂ from A to B
-
   const lva = a.body.getLinearVelocity();
   const vax = lva.x(), vay = lva.y(), vaz = lva.z();
   const lvb = b.body.getLinearVelocity();
   const vbx = lvb.x(), vby = lvb.y(), vbz = lvb.z();
-  const vN = (vax - vbx) * nx + (vay - vby) * ny + (vaz - vbz) * nz;
-  // Fire only on the first separating step (see impulsivePrevVN). vN < 0 means A
-  // and B moving apart along n̂; separated pairs stay that way for many steps.
-  const firstSeparation = -vN > COLL_EPS && !(prevVN !== undefined && -prevVN > COLL_EPS);
-  if (!firstSeparation) return vN;
-
-  const Jn = (1 + e_ball) * (m / 2) * (-vN) / e_ball;    // recovered normal impulse (|after|/e = |before|)
 
   // Relative surface velocity at the contact (includes both balls' spin):
   //   surfA = vA + ωA × (R n̂),  surfB = vB + ωB × (−R n̂)
@@ -353,57 +395,15 @@ function applyBallBall(a, b, prevVN) {
   const wvb = b.body.getAngularVelocity();
   cross(wvb.x(), wvb.y(), wvb.z(), -R * nx, -R * ny, -R * nz, _cp);
   const sbx = vbx + _cp[0], sby = vby + _cp[1], sbz = vbz + _cp[2];
-  let ux = sax - sbx, uy = say - sby, uz = saz - sbz;
-  const un = ux * nx + uy * ny + uz * nz;
-  const utx = ux - un * nx, uty = uy - un * ny, utz = uz - un * nz;
-  const uT = Math.hypot(utx, uty, utz);
-  if (uT < VT_EPS) return vN;
+  const uT = tangential(sax - sbx, say - sby, saz - sbz, nx, ny, nz, _ut);
+  if (uT < VT_EPS) return;
 
-  const mu = ballBallMu(uT);
-  const J = Math.min(mu * Jn, (m / 7) * uT);             // gearing cap for two equal balls
-  const jx = -J * utx / uT, jy = -J * uty / uT, jz = -J * utz / uT;   // impulse on A (−u_t)
+  const J = gearedJ(ballBallMu(uT), Jn, uT, CAP_BALL);
+  const jx = -J * _ut[0] / uT, jy = -J * _ut[1] / uT, jz = -J * _ut[2] / uT;   // impulse on A (−u_t)
 
   applyImpulse(a.body, jx, jy, jz, R * nx, R * ny, R * nz);          // A: r = +R n̂
   applyImpulse(b.body, -jx, -jy, -jz, -R * nx, -R * ny, -R * nz);    // B: opposite, r = −R n̂
-  return vN;
 }
 
-// Ball rebounding off a cushion (rail = infinite mass). Same once-only,
-// impulse-recovery logic as the ball–ball case. Returns the ball's separating
-// normal speed for the bookkeeping.
-function applyRail(ball, nx, ny, nz, prevVN) {
-  const body = ball.body;
-  const lv = body.getLinearVelocity();
-  const vx = lv.x(), vy = lv.y(), vz = lv.z();
-  const vN = vx * nx + vy * ny + vz * nz;                // n̂ rail→ball; separating ⇒ vN > 0
-  const firstSeparation = vN > COLL_EPS && !(prevVN !== undefined && prevVN > COLL_EPS);
-  if (!firstSeparation) return vN;
-
-  const Jn = (1 + e_rail) * m * vN / e_rail;
-  const w = body.getAngularVelocity();
-  cross(w.x(), w.y(), w.z(), -R * nx, -R * ny, -R * nz, _cp);   // ω × r, r = −R n̂
-  const ux = vx + _cp[0], uy = vy + _cp[1], uz = vz + _cp[2];
-  const un = ux * nx + uy * ny + uz * nz;
-  const utx = ux - un * nx, uty = uy - un * ny, utz = uz - un * nz;
-  const uT = Math.hypot(utx, uty, utz);
-  if (uT < VT_EPS) return vN;
-
-  const J = Math.min(mu_rail_kinetic * Jn, (2 / 7) * m * uT);
-  applyImpulse(body, -J * utx / uT, -J * uty / uT, -J * utz / uT, -R * nx, -R * ny, -R * nz);
-  return vN;
-}
-
-// Add a tangential impulse (jx,jy,jz) at contact offset r=(rx,ry,rz) from the
-// centre: linear J/m, angular (r × J)/I. Read-modify-write via setVelocity so
-// the change is exactly Δv/Δω (no dependence on Bullet's impulse bookkeeping).
-function applyImpulse(body, jx, jy, jz, rx, ry, rz) {
-  const v = body.getLinearVelocity();
-  tmpVec3.setValue(v.x() + jx / m, v.y() + jy / m, v.z() + jz / m);
-  body.setLinearVelocity(tmpVec3);
-  const w = body.getAngularVelocity();
-  cross(rx, ry, rz, jx, jy, jz, _cp);
-  tmpVec3.setValue(w.x() + _cp[0] / BALL_I, w.y() + _cp[1] / BALL_I, w.z() + _cp[2] / BALL_I);
-  body.setAngularVelocity(tmpVec3);
-}
 
 export { AmmoLib, tmpTransform, tmpVec3 };

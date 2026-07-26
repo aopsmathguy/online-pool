@@ -117,6 +117,91 @@ test('the rate does not depend on speed (the manifold point cache is not double 
     `decel is speed-dependent: ${slow.toFixed(5)} at 0.35 m/s vs ${fast.toFixed(5)} at 3.0 m/s`);
 });
 
+// The normal impulse Jn that applyFriction reads off each contact point is what
+// EVERY cloth friction scales by — slide->roll, rolling resistance, spin decay.
+// The whole calibration rests on one claim: over time that gated sum is the
+// ball's weight and nothing more. It is checked here against the only thing
+// that can settle it, conservation of vertical momentum:
+//
+//     sum(Jn_y) - m*g*T = m*(vy_end - vy_start)
+//
+// Start and end at rest and the right-hand side vanishes, so sum(Jn_y) must be
+// exactly m*g*T however the ball spent the interval. A BOUNCING ball is the
+// sharp case: Jn is zero through every flight and several times m*g during each
+// brief compression, so a gate that admitted one stale cache point, or dropped
+// one real one, would not average out — it would show up as a biased ratio here
+// while the resting control still looked perfect.
+test('a lightly bouncing ball averages exactly m*g of normal impulse', async () => {
+  const { sim, cue, Ammo } = await loneCue();
+
+  // Sum this step's gated normal impulse on the cue ball, projected onto +y —
+  // the same gate applyFriction applies (touching points only, positive only).
+  const verticalImpulse = () => {
+    const disp = sim.world.getDispatcher();
+    let sum = 0, pts = 0;
+    for (let i = 0; i < disp.getNumManifolds(); i++) {
+      const mani = disp.getManifoldByIndexInternal(i);
+      const nc = mani.getNumContacts();
+      if (nc === 0) continue;
+      const a = mani.getBody0(), b = mani.getBody1();
+      const isA = a.ptr === cue.ptr;
+      if (!isA && b.ptr !== cue.ptr) continue;
+      const s = isA ? 1 : -1;                   // normalWorldOnB runs B -> A
+      for (let j = 0; j < nc; j++) {
+        const cp = mani.getContactPoint(j);
+        if (cp.getDistance() > 0) continue;     // separated cache point
+        const Jn = cp.getAppliedImpulse();
+        if (Jn <= 0) continue;
+        sum += Jn * s * cp.get_m_normalWorldOnB().y();
+        pts++;
+      }
+    }
+    return { sum, pts };
+  };
+
+  const measure = (dropHeight, steps) => {
+    const t = cue.getWorldTransform();
+    t.setOrigin(new Ammo.btVector3(0, R + dropHeight, 0));
+    cue.setWorldTransform(t);
+    cue.getMotionState().setWorldTransform(t);
+    cue.setLinearVelocity(new Ammo.btVector3(0, 0, 0));
+    cue.setAngularVelocity(new Ammo.btVector3(0, 0, 0));
+
+    let J = 0, touchdowns = 0, airSteps = 0, wasTouching = false;
+    const vy0 = cue.getLinearVelocity().y();
+    for (let i = 0; i < steps; i++) {
+      cue.activate();                 // never let it sleep: a sleeping body gets no impulse
+      stepAndApplyFriction(sim.world, sim.balls, FIXED_DT);
+      const { sum, pts } = verticalImpulse();
+      J += sum;
+      if (pts > 0) { if (!wasTouching) touchdowns++; wasTouching = true; }
+      else { airSteps++; wasTouching = false; }
+    }
+    const T = steps * FIXED_DT;
+    const expected = m * g * T + m * (cue.getLinearVelocity().y() - vy0);
+    return { ratio: J / expected, touchdowns, airSteps };
+  };
+
+  // Resting control first: if this one fails the gate is broken outright, not
+  // just mis-averaged over flight.
+  const rest = measure(0, 750);
+  assert.ok(Math.abs(rest.ratio - 1) < 1e-4,
+    `resting ball: mean normal impulse is ${rest.ratio.toFixed(6)}x m*g`);
+
+  // Then genuinely bouncing ones. Each must actually leave the cloth, or the
+  // test would pass vacuously by measuring a ball that just sat there. The
+  // airborne budget is per-case because flight time scales as sqrt(h): a 0.5 mm
+  // drop is ~10 ms of fall, only about 3 steps each way at FIXED_DT.
+  for (const [drop, steps, minTouchdowns, minAir] of
+       [[0.0005, 750, 2, 4], [0.002, 750, 3, 8], [0.010, 1000, 4, 20]]) {
+    const r = measure(drop, steps);
+    assert.ok(r.airSteps >= minAir && r.touchdowns >= minTouchdowns,
+      `${drop * 1000}mm drop never really bounced (${r.touchdowns} touchdowns, ${r.airSteps} airborne steps)`);
+    assert.ok(Math.abs(r.ratio - 1) < 1e-4,
+      `${drop * 1000}mm bounce: mean normal impulse is ${r.ratio.toFixed(6)}x m*g over ${r.touchdowns} touchdowns`);
+  }
+});
+
 test('a ball in the air keeps its speed and its spin', async () => {
   const { sim, cue, Ammo } = await loneCue();
   // Well clear of the cloth, so no contact and therefore no friction. Gravity

@@ -18,7 +18,7 @@ export const mu_cup_kinetic  = 0.10;   // pocket-cup slide friction (plastic/rub
 // Ball–ball dynamic friction FALLS with the relative tangential surface speed s
 // (m/s) at contact, which is what makes object-ball throw depend on shot speed
 // (soft shots throw more, firm shots less). Empirical fit for clean pool balls
-// (Marlow's data, per Alciatore):
+// (Marlow's data, per ther):
 //   mu(s) = mu_ball_asym + mu_ball_amp · exp(−mu_ball_decay · s)
 export const mu_ball_asym  = 0.009951;  // high-speed asymptote
 export const mu_ball_amp   = 0.108;     // extra friction as s → 0 (μ(0) = asym + amp ≈ 0.118)
