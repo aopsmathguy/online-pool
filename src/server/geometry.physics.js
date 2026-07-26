@@ -71,22 +71,31 @@ function addPolylineCapsules(Ammo, compound, pointsXZ, wireR, wireY, margin) {
   }
 }
 
-// The whole table boundary as ONE static body: six solid trapezoidal rails
-// (convex hulls, from the shared rail_solid) and six wire pocket throats
-// (capsules). They share a body deliberately — the contact scanner in sim.js
-// recognises a rail hit by a single body pointer, so splitting these into
-// twelve bodies would make every cushion contact read as "not a rail".
+// The whole table boundary as TWO static bodies, split by MATERIAL: six solid
+// trapezoidal rails (convex hulls, from the shared rail_solid) and six wire
+// pocket throats (capsules). Every rail is one body and every wire the other —
+// never twelve — because the contact scanner in sim.js recognises a cushion hit
+// by body pointer, and one pointer per material is the fewest it can be asked
+// to know.
+//
+// The split is exactly the material boundary. The wire lines the pocket, so it
+// plays like the pocket: dead, not springy. Bullet's restitution lives on the
+// BODY, not the child shape, so the wire cannot carry its own bounce while it
+// shares a compound with the cushions — hence `wireE`, and hence two bodies.
+// The rules still count both as a rail; see scanContacts.
 //
 // A ball centre sits at y=R, below the rails' y=wireY top edge, so contact
 // lands on that 45 deg nose edge — the same line the old wire ran along.
 export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = {}) {
   const Ammo = AmmoLib;
   const mu = opts.mu ?? 0;           // frictionless — friction is analytic (physics.js)
-  const e  = opts.e  ?? e_rail;      // restitution vs balls
+  const e  = opts.e  ?? e_rail;      // rail restitution vs balls
+  const wireE = opts.wireE ?? e;     // wire restitution vs balls (the pocket's)
   const margin = opts.margin ?? 0.001;
 
   const { wires, rails } = table_parts(tableW, tableH);
-  const compound = new Ammo.btCompoundShape();
+  const railShape = new Ammo.btCompoundShape();
+  const wireShape = new Ammo.btCompoundShape();
   const tmpTr = new Ammo.btTransform();
   tmpTr.setIdentity();
 
@@ -100,24 +109,26 @@ export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = 
     Ammo.destroy(v);
     hull.setMargin(margin);
     tmpTr.setIdentity();
-    compound.addChildShape(tmpTr, hull);
+    railShape.addChildShape(tmpTr, hull);
   }
 
   // Wire only where the rails don't already reach — see table_parts. It rides
   // at pocketWireY, level with the rails' raised outer-top corners it joins.
   for (const wire of wires) {
-    addPolylineCapsules(Ammo, compound, wire, wireR, pocketWireY, margin);
+    addPolylineCapsules(Ammo, wireShape, wire, wireR, pocketWireY, margin);
   }
 
-  return createRigidBody(world, {
+  const staticBody = (shape, rest) => createRigidBody(world, {
     mass: 0,
-    shape: compound,
+    shape,
     pos:   { x: 0, y: 0, z: 0 },
     quat:  { x: 0, y: 0, z: 0, w: 1 },
     fric:  mu,
-    rest:  e,
+    rest,
     rollF: 0, spinF: 0, linD: 0, angD: 0,
   });
+
+  return { railBody: staticBody(railShape, e), wireBody: staticBody(wireShape, wireE) };
 }
 
 export function createCylindricalCup(world, radius, height, opts = {}) {

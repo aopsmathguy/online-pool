@@ -6,8 +6,9 @@
 // constructor so that constructor reads as "set up state" rather than 30 lines
 // of collision-shape assembly.
 //
-// The only thing the caller needs back is `railPtr`: the contact scanner
-// identifies rail hits by body pointer (see scanContacts in sim.js).
+// The only thing the caller needs back is `railPtrs`: the contact scanner
+// identifies rail hits by body pointer (see scanContacts in sim.js), and the
+// boundary is two bodies — cushions and pocket wire — so it is a set of two.
 import { tableW, tableH, wireY, rodR, e_rail, e_table, e_pocket, cupDepth, cupY } from '../shared/constants.js';
 import {
   createWorld, createRigidBody, setBodyFilter, AmmoLib,
@@ -22,7 +23,7 @@ import { pocketPositions } from '../shared/pockets.js';
 export const railPoints = rail_pts(tableW, tableH);
 export const feltPoints = felt_pts(tableW, tableH);   // felt outline WITH pocket cutouts
 
-// Returns { world, railPtr }.
+// Returns { world, railPtrs }.
 export function buildTableWorld() {
   const world = createWorld();
 
@@ -47,14 +48,24 @@ export function buildTableWorld() {
   feltMesh.setUserIndex(SURF_FELT);
   setBodyFilter(world, feltMesh, CG_FELTMESH, CG_BALL);
 
-  // Rails (solid cushions) + pocket throats (wire), one body — see
-  // createTableBoundary for why they must not be split. Frictionless in Bullet;
-  // rail tangential friction is resolved analytically (physics.js).
-  const railBody = createTableBoundary(world, tableW, tableH, rodR, wireY, {
-    mu: 0, e: e_rail, margin: 0.0002,
+  // Rails (solid cushions) + pocket throats (wire). Two bodies, one per
+  // material — see createTableBoundary. Both are frictionless in Bullet;
+  // tangential friction is resolved analytically (physics.js).
+  //
+  // The wire is the pocket's lining, so it is given the pocket's material and
+  // not the cushions': the cup's restitution (e_pocket, a dead drop rather than
+  // a 0.98 rebound) and the cup's surface id, which hands it the cup's friction
+  // coefficients in the analytic pass. A ball that catches the jaw now dies in
+  // the throat the way it does against the cup wall instead of springing back
+  // off it. It stays in CG_RAIL so both ball masks still see it, and sim.js
+  // still counts a wire contact as a cushion contact for the rules.
+  const { railBody, wireBody } = createTableBoundary(world, tableW, tableH, rodR, wireY, {
+    mu: 0, e: e_rail, wireE: e_pocket, margin: 0.0002,
   });
   railBody.setUserIndex(SURF_RAIL);
   setBodyFilter(world, railBody, CG_RAIL, CG_BALL);
+  wireBody.setUserIndex(SURF_CUP);
+  setBodyFilter(world, wireBody, CG_RAIL, CG_BALL);
 
   // Pocket cups are frictionless like every other body — a pocketed ball just
   // dead-drops into the cup (low pocket restitution damps the bounce) and is
@@ -68,5 +79,5 @@ export function buildTableWorld() {
     setBodyFilter(world, cup, CG_POCKET, CG_BALL | CG_SUNK);   // holds live + pocketed balls
   }
 
-  return { world, railPtr: railBody.ptr };
+  return { world, railPtrs: new Set([railBody.ptr, wireBody.ptr]) };
 }

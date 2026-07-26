@@ -156,11 +156,107 @@ SI units (metres, kg, seconds). The table lies in the XZ plane, Y is up:
   anything is sent to clients; accuracy comes from here) and then applies hand-rolled
   felt drag: linear deceleration `mu_felt_linear·g` on horizontal speed and a tapered
   decay on Y-axis (english) spin. Bullet's own rolling/spinning friction is disabled.
-- Balls use CCD (swept spheres) so break shots can't tunnel through cushions.
+- Balls use CCD (swept spheres) — not only against tunnelling, it is what makes the
+  ball-ball cut angle accurate. See **CCD** below; the three settings involved are
+  interlocking and none of them are free to tune.
 - `body.ptr` is a stable numeric pointer identity in both Ammo builds; the manifold
   scanner relies on `manifold.getBody0().ptr` matching it.
 
 **User indices** (debug labels): 1 = ball, 2 = rail, 3 = felt, 4 = pocket cup.
+
+### CCD (continuous collision detection) — do not retune these
+
+Three settings work as a unit. Changing any one of them in isolation breaks the
+others. All values below were measured against `lib/ammo.server.cjs` (Bullet ≥ 2.89)
+at `FIXED_DT = 4 ms`, `R = 0.028575`.
+
+```js
+// physics.js, createWorld()
+world.getDispatchInfo().set_m_allowedCcdPenetration(0);
+// balls.logic.js
+body.setCcdSweptSphereRadius(R - 0.001);
+body.setContactProcessingThreshold(0.);
+```
+
+**Why `m_allowedCcdPenetration(0)`.** Despite the name it is not a penetration depth.
+`btClosestNotMeConvexResultCallback::addSingleResult` compares it against
+`hitNormal · (to − from)` — the raw per-step **displacement in metres**. At Bullet's
+default of `0.04`, a CCD hit is discarded unless the ball moves 40 mm in one tick,
+i.e. **CCD is completely inert below 10 m/s** (`0.04 / 0.004`). Measured: zero
+clamping at 9 m/s, clamping at 10. Setting it to 0 is what turns CCD *on* at all.
+Without this line `setCcdSweptSphereRadius` does nothing.
+
+**Why the swept radius is exactly `R - 0.001`.** Bullet's sweep terminates its
+conservative-advancement loop at a **hardcoded 1 mm**, not at zero:
+
+```cpp
+// btContinuousConvexCollision.cpp:126
+btScalar radius = 0.001f;
+...
+while (dist > radius)          // line 148
+```
+
+It is absolute metres — no dependence on ball size, margin, or timestep — with no
+setter, no `#define`, and no way to reach it from Ammo. It has been unchanged since
+2006 (deleted once in 2011 and restored 40 minutes later: *"necessary for
+termination"*).
+
+The sweep casts a sphere of radius `R − e` against the other ball's real `R` shape,
+so the ball parks at a real overlap of `e − dist_exit` where `dist_exit ∈ [0, 1 mm]`.
+`e = 1 mm` is therefore the **smallest** value for which the parked state is always
+an overlap and never a gap:
+
+| `e` | parked real overlap |
+|---|---|
+| `0.001` (shipped) | `(0, 1 mm]` — always touching |
+| `0.000268` | `(−0.73 mm, 0.27 mm]` — **up to 0.73 mm apart** |
+
+Park the balls with a gap and the *next* tick's sweep starts already inside the 1 mm
+tolerance, so the loop never runs and the hit fraction comes back **0**. The ball is
+frozen for that tick, and `createPredictiveContacts` injects a manifold point at
+distance exactly 0 carrying `m_combinedRestitution = 0`
+(`btDiscreteDynamicsWorld.cpp:918`). Distance 0 passes the processing-threshold gate,
+so it *is* solved — and the collision comes out **perfectly inelastic**: object ball
+at half the closing speed, 48.7 % speed loss, exactly half the pair's kinetic energy
+destroyed with momentum still exact. This is the failure `test/conservation.test.js`
+catches. Roughly half of all tick phases fail this way, so the *average* loss at
+`R - 0.000268` is 20-29 %.
+
+The same sweep runs against the **felt**, so a sub-millimetre margin also freezes a
+merely rolling ball on about every other tick: measured travel drops to **50 % of
+correct** at `R - 0.000857`, with no collision involved at all.
+
+The cliff is sharp to within 50 µm — `e = 0.001000` shows zero failures,
+`e = 0.000950` already halves felt travel. Going the other way is safe but blunts
+accuracy: `0.9R` (the old value) triples the cut-angle spread, 1.70° vs 0.585°.
+
+**Why `setContactProcessingThreshold(0.)` is load-bearing.** It is what discards the
+zero-restitution predictive contacts described above in the normal case (their
+distance is *travel-to-impact*, a positive number, so the gate drops them and only
+the real elastic contact reaches the solver). At Bullet's default of `BT_LARGE_FLOAT`
+every predictive contact is admitted and *every* fast ball gets the inelastic catch —
+measured 0.465× the correct object-ball speed even with the 1 mm margin. Do **not**
+make it negative either: at `-1e-5` the ball wedges permanently, clamped at touch
+every tick with no contact ever admitted.
+
+**Non-issues, so nobody re-investigates them.** There is no minimum penetration
+anywhere on the response side: the impulse is bit-identical correct from 0.1 µm to
+30 mm of overlap. `m_linearSlop` is 0; restitution never decays (ball-ball manifolds
+are cleared every tick, so there is no warm starting and no contact lifetime); and
+sphere-sphere generates **no** contact at all at positive separation, so the
+0.99 mm contact-breaking threshold never gates ball-ball. That threshold happening to
+land near 1 mm for this ball radius is a coincidence — it scales with `R`, the CCD
+constant does not.
+
+**Ammo binding gotcha.** `si.set_m_splitImpulsePenetrationThreshold(-0.02)` in
+`createWorld` is a silent no-op that stores **0** — the field is bound as an integer
+and truncates toward zero (`set(-0.5) → 0`, `set(-1.7) → -1`). This is benign and in
+fact desirable (with the threshold at 0 the split-impulse branch always wins, so erp
+positional recovery never leaks into velocity at any depth, which is why accuracy is
+flat vs penetration). But it is fragile: an Ammo rebuild with a correctly typed float
+would restore an `erp2·pen/dt` velocity injection. `m_restitutionVelocityThreshold` on
+the next line *is* a real float. Round-trip any Ammo solver-info setter before
+trusting it.
 
 ---
 

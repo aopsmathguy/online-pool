@@ -62,9 +62,9 @@ const railClearPts = densify(railPoints);   // sampled rail for cue-clearance
 
 export class RoomSim {
   constructor(rulesetId) {
-    const { world, railPtr } = buildTableWorld();
+    const { world, railPtrs } = buildTableWorld();
     this.world = world;
-    this.railPtr = railPtr;     // scanContacts identifies rail hits by this ptr
+    this.railPtrs = railPtrs;   // scanContacts identifies rail hits by these ptrs
     this.balls = [];
     this.game = createGame(rulesetId, this.balls);
 
@@ -321,7 +321,9 @@ export class RoomSim {
 
   scanContacts() {
     const disp = this.world.getDispatcher();
-    const railPtr = this.railPtr;
+    // Cushions and pocket wire are separate bodies (they are separate
+    // materials), but both are "a rail" as far as the rules are concerned.
+    const railPtrs = this.railPtrs;
     const n = disp.getNumManifolds();
     for (let i = 0; i < n; i++) {
       const mani = disp.getManifoldByIndexInternal(i);
@@ -334,9 +336,9 @@ export class RoomSim {
           const obj = cue0 ? ball1 : ball0;
           if (obj.number != null) this.game.recordFirstHit(obj.number);
         }
-      } else if (ball0 && p1 === railPtr) {
+      } else if (ball0 && railPtrs.has(p1)) {
         this.game.recordRail(ball0.number);
-      } else if (ball1 && p0 === railPtr) {
+      } else if (ball1 && railPtrs.has(p0)) {
         this.game.recordRail(ball1.number);
       }
     }
