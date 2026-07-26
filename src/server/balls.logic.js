@@ -42,7 +42,7 @@ export function resetRack(world, balls, layout) {
       group: CG_BALL, mask: MASK_BALL_NORMAL,
     });
     body.setUserIndex(SURF_BALL);
-    body.setCcdSweptSphereRadius(R * 0.9);
+    body.setCcdSweptSphereRadius(R * 0.99);
     body.setCcdMotionThreshold(R * 0.02);
     body.setSleepingThresholds(0.0002, 0.0002);
     body.setContactProcessingThreshold(0.);
