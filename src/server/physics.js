@@ -74,6 +74,7 @@ export function createWorld() {
   if (si.set_m_splitImpulse) si.set_m_splitImpulse(true);
   if (si.set_m_splitImpulsePenetrationThreshold) si.set_m_splitImpulsePenetrationThreshold(-0.02);
   si.set_m_restitutionVelocityThreshold(0);
+  world.getDispatchInfo().set_m_allowedCcdPenetration(0);
   return world;
 }
 
