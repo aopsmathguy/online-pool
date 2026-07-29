@@ -36,7 +36,12 @@ export function createBotClient({ socket, getSim, isLocked, skill = 0.5 }) {
   let state = null;         // last gameState we were told about
   let busyUntil = 0;        // we are "watching" a shot until this wall-clock time
   let acting = false;       // a decision is already scheduled
-  let timers = [];
+  // PENDING timers only. A bot lines up ~16 of them per shot (the aim, fourteen
+  // draw-back steps, the strike) and the demo table plays for as long as the
+  // server is up, so anything kept here per shot rather than per pending timer
+  // grows without bound — a Timeout that has already fired is dead weight, and
+  // its closure holds the shot it was scheduled for.
+  const timers = new Set();
   let alive = true;
 
   const bot = {
@@ -45,11 +50,15 @@ export function createBotClient({ socket, getSim, isLocked, skill = 0.5 }) {
     stop() {
       alive = false;
       for (const t of timers) clearTimeout(t);
-      timers = [];
+      timers.clear();
     },
   };
 
-  const later = (fn, ms) => { const t = setTimeout(() => { if (alive) fn(); }, ms); timers.push(t); return t; };
+  const later = (fn, ms) => {
+    const t = setTimeout(() => { timers.delete(t); if (alive) fn(); }, ms);
+    timers.add(t);
+    return t;
+  };
   const now = () => Date.now();
 
   socket.on('roomJoined', (d) => { myIndex = d.playerIndex; });

@@ -11,7 +11,7 @@
 // boundary is two bodies — cushions and pocket wire — so it is a set of two.
 import { tableW, tableH, wireY, rodR, e_rail, e_table, e_pocket, cupDepth, cupY } from '../shared/constants.js';
 import {
-  createWorld, createRigidBody, setBodyFilter, AmmoLib,
+  createWorld, createRigidBody, setBodyFilter, trackShape, AmmoLib,
   CG_FELT, CG_BALL, CG_RAIL, CG_POCKET, CG_SUNK, CG_FELTMESH,
   SURF_RAIL, SURF_FELT, SURF_CUP,
 } from './physics.js';
@@ -33,7 +33,9 @@ export function buildTableWorld() {
   // below, which has the real hole, so it pivots over the lip and tips in.
   // The two are coplanar (y=0) AND — while the centre is inside — give a sphere
   // the identical contact, so the swap is invisible; see isOffFelt.
-  const planeShape = new AmmoLib.btStaticPlaneShape(new AmmoLib.btVector3(0, 1, 0), 0);
+  const up = new AmmoLib.btVector3(0, 1, 0);
+  const planeShape = trackShape(world, new AmmoLib.btStaticPlaneShape(up, 0));
+  AmmoLib.destroy(up);                 // the shape copies the normal
   const feltBody = createRigidBody(world, {
     // Frictionless in Bullet — cloth friction is resolved analytically in
     // physics.js (applyFriction). Bullet does only the normal support/bounce.

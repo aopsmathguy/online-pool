@@ -14,6 +14,7 @@ import {
 } from '../shared/constants.js';
 import {
   setBodyFilter, stepAndApplyFriction, tmpVec3, AmmoLib,
+  destroyRigidBody, destroyWorld,
   CG_BALL, CG_SUNK,
   MASK_BALL_NORMAL, MASK_BALL_OFF_FELT, MASK_SUNK,
 } from './physics.js';
@@ -81,6 +82,20 @@ export class RoomSim {
   }
 
   // --- Public API used by the server -----------------------------------------
+  // Give the room's world back to the Ammo heap. A RoomSim that is merely
+  // dropped costs ~4 MB that never returns — the JS collector cannot see any of
+  // it (see the ownership note in physics.js) — so every path that ends a room
+  // has to come through here. Idempotent, and the sim is unusable afterwards.
+  dispose() {
+    if (!this.world) return;
+    destroyWorld(this.world);
+    this.world = null;
+    this.balls = [];
+    this.sunk = [];
+    this.ballByPtr.clear();
+    this.railPtrs = new Set();
+  }
+
   setPlayerNames(a, b) {
     this.game.getState().players[0].name = a;
     this.game.getState().players[1].name = b;
@@ -90,7 +105,7 @@ export class RoomSim {
     if (changeGame) this.game.setRuleset(changeGame);
     else this.game.reset();
     const layout = this.game.rackLayout({ tableW, tableH });
-    for (const b of this.sunk) this.world.removeRigidBody(b.body);   // clear last game's pocketed balls
+    for (const b of this.sunk) destroyRigidBody(this.world, b.body);   // clear last game's pocketed balls
     this.sunk = [];
     resetRack(this.world, this.balls, layout);
     this.balls.forEach((b, i) => { b.id = i; b.scratched = false; b.pendingSpot = false; });
@@ -422,7 +437,9 @@ export class RoomSim {
   // clears their meshes as the replay ends. Returns the removals to append.
   clearSunk(frame) {
     const out = this.sunk.map(b => ({ id: b.id, frame }));
-    for (const b of this.sunk) this.world.removeRigidBody(b.body);
+    // Destroyed, not just unlinked: the ball is out of the game for good, and a
+    // body that is only removed from the world stays in the Ammo heap forever.
+    for (const b of this.sunk) destroyRigidBody(this.world, b.body);
     this.sunk = [];
     return out;
   }

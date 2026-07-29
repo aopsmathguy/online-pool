@@ -177,7 +177,7 @@ function createRoom(conn, rulesetId, isPublic = false, { announce = true, vsBot 
   const seat = makeSeat(conn);
   const room = {
     code: makeCode(), rulesetId, seats: [seat], sim: null, public: isPublic,
-    shotLog: [], shotIndex: 0, watchers: new Set(),
+    shotLog: [], shotIndex: 0, watchers: new Set(), bots: [],
   };
   rooms.set(room.code, room);
   conn.room = room; conn.index = 0;
@@ -243,8 +243,14 @@ function performShot(room, playerIdx, params) {
   // The client applies all of this when playback finishes, so nothing about the
   // outcome can arrive early and nothing has to be queued.
   anim.packet.post = presentPost(room.sim);   // placing.active is false unless ball-in-hand
-  room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
-  trimShotLog(room);
+  // The demo table keeps no log. Every reader of it (resumeSeat, requestShot,
+  // the review list) needs a SEAT, and the demo table's two seats are bots — so
+  // a log there is memory nobody can ever ask for, and at a quarter of a
+  // megabyte per shot it is the largest thing the room would hold.
+  if (!room.demo) {
+    room.shotLog.push({ index: anim.packet.index, packet: anim.packet, pre, preLayout });
+    trimShotLog(room);
+  }
   broadcast(room, 'shotAnim', anim.packet);
   if (room.demo) maybeRerack(room);   // the demo table never stops on a win
   return true;
@@ -267,6 +273,17 @@ function destroyRoom(room, exceptConn) {
     c.room = null;
     if (c !== exceptConn) c.socket.emit('opponentLeft', {});
   }
+  // Any computer players stop here. They also stop on the `opponentLeft` above,
+  // which is how it used to happen — but a bot left running holds a chain of
+  // timers and, through them, this whole room, so the teardown says so itself
+  // rather than depending on a packet arriving.
+  for (const bot of room.bots) bot.stop();
+  room.bots = [];
+  room.bot = null;
+  // The sim owns an Ammo world: ~4 MB of WASM heap that the JS collector cannot
+  // reclaim, however thoroughly the room is forgotten. Dropping the reference is
+  // not enough — it has to be handed back explicitly.
+  if (room.sim) { room.sim.dispose(); room.sim = null; }
   room.shotLog = [];
 }
 
@@ -586,6 +603,7 @@ function seatBot(skill, enter) {
 function spawnBot(room, skill) {
   const { bot } = seatBot(skill, (s) => s.emit('joinRoom', { name: 'Computer', code: room.code }));
   room.bot = bot;   // handle for the difficulty slider; the game loop ignores it
+  room.bots.push(bot);
   return bot;
 }
 
@@ -611,7 +629,9 @@ function ensureDemoRoom() {
   const opener = seatBot(DEMO_SKILL, (s) => s.emit('createRoom', { name: 'Computer', game: GAME_8BALL }));
   demoRoom = opener.conn.room;
   demoRoom.demo = true;
-  seatBot(DEMO_SKILL, (s) => s.emit('joinRoom', { name: 'Computer 2', code: demoRoom.code }));
+  demoRoom.bots.push(opener.bot);
+  const filler = seatBot(DEMO_SKILL, (s) => s.emit('joinRoom', { name: 'Computer 2', code: demoRoom.code }));
+  demoRoom.bots.push(filler.bot);
   return demoRoom;
 }
 

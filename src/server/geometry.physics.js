@@ -3,7 +3,7 @@
 // build its own table. Ported verbatim from the physics halves of the old
 // geometry.js (the mesh halves stay in geometry.js for the client).
 import { e_rail, e_table, pocketWireY } from '../shared/constants.js';
-import { AmmoLib, createRigidBody } from './physics.js';
+import { AmmoLib, createRigidBody, trackShape } from './physics.js';
 import { triangulate } from '../shared/triangulate.js';
 import { table_parts, rail_solid } from '../shared/table.js';
 
@@ -28,14 +28,21 @@ export function createFeltMesh(world, feltPts, y = 0, opts = {}) {
   Ammo.destroy(va); Ammo.destroy(vb); Ammo.destroy(vc);
 
   const shape = new Ammo.btBvhTriangleMeshShape(mesh, true, true);   // quantized AABB + build BVH
+  // The shape does not own the mesh interface, so the world has to own both:
+  // between the BVH and the triangle data this is the heaviest thing a room
+  // builds, and it is the single biggest item leaked by a forgotten world.
+  trackShape(world, mesh);
+  trackShape(world, shape);
   return createRigidBody(world, {
     mass: 0, shape, pos: { x: 0, y: 0, z: 0 }, quat: { x: 0, y: 0, z: 0, w: 1 },
     fric: mu, rest: e, rollF: 0, spinF: 0, linD: 0, angD: 0,
   });
 }
 
-// quaternion to rotate (0,1,0) -> dir (unit)
-function quatFromUpToDir(Ammo, dir) {
+// Write into `q` the rotation taking (0,1,0) -> dir (unit). Fills a caller-owned
+// quaternion rather than returning a new one: every Ammo object allocated here
+// would otherwise stay in the heap for the life of the process (see physics.js).
+function quatFromUpToDir(q, dir) {
   const ux=0, uy=1, uz=0;
   const dx=dir[0], dy=dir[1], dz=dir[2];
   const dot = uy*dy;
@@ -43,17 +50,22 @@ function quatFromUpToDir(Ammo, dir) {
   const cy = uz*dx - ux*dz;
   const cz = ux*dy - uy*dx;
   if (dot < -0.999999) {
-    return new Ammo.btQuaternion(1,0,0,0);
+    q.setValue(1,0,0,0);
   } else {
     const s = Math.sqrt((1 + dot) * 2);
     const invs = 1 / s;
-    return new Ammo.btQuaternion(cx * invs, cy * invs, cz * invs, s * 0.5);
+    q.setValue(cx * invs, cy * invs, cz * invs, s * 0.5);
   }
+  return q;
 }
 
 // Capsules along a polyline at height `wireY`, added to an existing compound.
-function addPolylineCapsules(Ammo, compound, pointsXZ, wireR, wireY, margin) {
+// `world` only so the capsules can be registered as its property — they are
+// children of a compound, which does not own them.
+function addPolylineCapsules(Ammo, world, compound, pointsXZ, wireR, wireY, margin) {
   const tmpTr = new Ammo.btTransform();
+  const tmpV = new Ammo.btVector3();
+  const tmpQ = new Ammo.btQuaternion(0, 0, 0, 1);
   for (let i = 0; i + 1 < pointsXZ.length; i++) {
     const [x1,z1] = pointsXZ[i];
     const [x2,z2] = pointsXZ[i+1];
@@ -61,14 +73,16 @@ function addPolylineCapsules(Ammo, compound, pointsXZ, wireR, wireY, margin) {
     const len = Math.hypot(dx, dz);
     if (len < 1e-6) continue;
 
-    const cap = new Ammo.btCapsuleShape(wireR, Math.max(0, len - 2 * wireR));
+    const cap = trackShape(world, new Ammo.btCapsuleShape(wireR, Math.max(0, len - 2 * wireR)));
     cap.setMargin(margin);
 
     tmpTr.setIdentity();
-    tmpTr.setOrigin(new Ammo.btVector3((x1 + x2) * 0.5, wireY, (z1 + z2) * 0.5));
-    tmpTr.setRotation(quatFromUpToDir(Ammo, [dx/len, 0, dz/len]));
+    tmpV.setValue((x1 + x2) * 0.5, wireY, (z1 + z2) * 0.5);
+    tmpTr.setOrigin(tmpV);
+    tmpTr.setRotation(quatFromUpToDir(tmpQ, [dx/len, 0, dz/len]));
     compound.addChildShape(tmpTr, cap);
   }
+  Ammo.destroy(tmpTr); Ammo.destroy(tmpV); Ammo.destroy(tmpQ);
 }
 
 // The whole table boundary as TWO static bodies, split by MATERIAL: six solid
@@ -94,13 +108,13 @@ export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = 
   const margin = opts.margin ?? 0.001;
 
   const { wires, rails } = table_parts(tableW, tableH);
-  const railShape = new Ammo.btCompoundShape();
-  const wireShape = new Ammo.btCompoundShape();
+  const railShape = trackShape(world, new Ammo.btCompoundShape());
+  const wireShape = trackShape(world, new Ammo.btCompoundShape());
   const tmpTr = new Ammo.btTransform();
   tmpTr.setIdentity();
 
   for (const rail of rails) {
-    const hull = new Ammo.btConvexHullShape();
+    const hull = trackShape(world, new Ammo.btConvexHullShape());
     const v = new Ammo.btVector3();
     for (const [x, y, z] of rail_solid(rail, wireY)) {
       v.setValue(x, y, z);
@@ -115,8 +129,9 @@ export function createTableBoundary(world, tableW, tableH, wireR, wireY, opts = 
   // Wire only where the rails don't already reach — see table_parts. It rides
   // at pocketWireY, level with the rails' raised outer-top corners it joins.
   for (const wire of wires) {
-    addPolylineCapsules(Ammo, wireShape, wire, wireR, pocketWireY, margin);
+    addPolylineCapsules(Ammo, world, wireShape, wire, wireR, pocketWireY, margin);
   }
+  Ammo.destroy(tmpTr);
 
   const staticBody = (shape, rest) => createRigidBody(world, {
     mass: 0,
@@ -142,31 +157,37 @@ export function createCylindricalCup(world, radius, height, opts = {}) {
   const margin   = opts.margin   ?? 0.001;
   const pos      = opts.pos      ?? { x: 0, y: 0, z: 0 };
 
-  const compound = new Ammo.btCompoundShape();
+  const compound = trackShape(world, new Ammo.btCompoundShape());
   const tmpTr = new Ammo.btTransform();
+  const tmpV = new Ammo.btVector3();
+  const tmpQ = new Ammo.btQuaternion(0, 0, 0, 1);
   tmpTr.setIdentity();
 
   // Bottom disc
   {
     const halfH = base * 0.5;
-    const bottom = new Ammo.btCylinderShape(new Ammo.btVector3(radius, halfH, radius));
+    tmpV.setValue(radius, halfH, radius);
+    const bottom = trackShape(world, new Ammo.btCylinderShape(tmpV));
     bottom.setMargin(margin);
     tmpTr.setIdentity();
-    tmpTr.setOrigin(new Ammo.btVector3(pos.x, pos.y - height * 0.5, pos.z));
+    tmpV.setValue(pos.x, pos.y - height * 0.5, pos.z);
+    tmpTr.setOrigin(tmpV);
     compound.addChildShape(tmpTr, bottom);
   }
 
-  // Side wall (ring of thin boxes)
+  // Side wall (ring of thin boxes) — one shape, reused by every stave.
   const hx = wall * 0.5;
   const hy = height * 0.5;
   const segLen = (2 * Math.PI * radius / segments) * 1.02;
   const hz = segLen * 0.5;
-  const stave = new Ammo.btBoxShape(new Ammo.btVector3(hx, hy, hz));
+  tmpV.setValue(hx, hy, hz);
+  const stave = trackShape(world, new Ammo.btBoxShape(tmpV));
   stave.setMargin(margin);
 
   function quatAroundY(theta) {
     const half = 0.5 * theta;
-    return new Ammo.btQuaternion(0, Math.sin(half), 0, Math.cos(half));
+    tmpQ.setValue(0, Math.sin(half), 0, Math.cos(half));
+    return tmpQ;
   }
 
   for (let i = 0; i < segments; i++) {
@@ -175,10 +196,12 @@ export function createCylindricalCup(world, radius, height, opts = {}) {
     const cx = pos.x + rCenter * Math.cos(theta);
     const cz = pos.z + rCenter * Math.sin(theta);
     tmpTr.setIdentity();
-    tmpTr.setOrigin(new Ammo.btVector3(cx, pos.y, cz));
+    tmpV.setValue(cx, pos.y, cz);
+    tmpTr.setOrigin(tmpV);
     tmpTr.setRotation(quatAroundY(theta));
     compound.addChildShape(tmpTr, stave);
   }
+  Ammo.destroy(tmpTr); Ammo.destroy(tmpV); Ammo.destroy(tmpQ);
 
   return createRigidBody(world, {
     mass: 0,

@@ -50,6 +50,11 @@ export const MASK_BALL_OFF_FELT    = CG_FELTMESH | CG_RAIL | CG_POCKET | CG_BALL
 export const MASK_SUNK             = CG_POCKET | CG_SUNK;
 
 let AmmoLib, tmpTransform, tmpVec3;
+// Scratch for createRigidBody, which Bullet copies out of by value at
+// construction — so one set serves every body ever built. It is kept separate
+// from tmpTransform/tmpVec3 only so that a caller can hold those across a
+// createRigidBody call without thinking about it.
+let rbTr, rbVec, rbQuat, rbInertia;
 
 // Load the Ammo runtime once. In the browser `Ammo` is the global from the
 // <script> tag; in Node the server sets globalThis.Ammo before calling this.
@@ -57,7 +62,37 @@ export async function initPhysics() {
   AmmoLib = await Ammo();
   tmpTransform = new AmmoLib.btTransform();
   tmpVec3 = new AmmoLib.btVector3(0, 0, 0);
+  rbTr = new AmmoLib.btTransform();
+  rbVec = new AmmoLib.btVector3(0, 0, 0);
+  rbQuat = new AmmoLib.btQuaternion(0, 0, 0, 1);
+  rbInertia = new AmmoLib.btVector3(0, 0, 0);
   return { AmmoLib, tmpTransform, tmpVec3 };
+}
+
+// --- Ownership ---------------------------------------------------------------
+// EVERY Ammo object lives in the WASM heap, which the JavaScript garbage
+// collector cannot see. Dropping the last JS reference to a body, a shape or a
+// world does not free it — it leaks for the lifetime of the process. A `new
+// Ammo.btVector3` in a hot path is therefore not garbage, it is a permanent
+// allocation, and a room whose world is merely forgotten costs ~4 MB of heap
+// that never comes back.
+//
+// Nothing in Bullet is reference-counted, so ownership has to be explicit: each
+// world carries the list of what was built for it, and destroyWorld frees the
+// lot. Bodies are registered by createRigidBody (which also holds their motion
+// state, unreachable from JS once it returns); shapes register themselves at
+// their construction site via trackShape.
+//
+// Keyed by POINTER, so a shape shared between bodies — the ball sphere, a cup's
+// staves — is listed once however many times it is tracked, and freed once.
+const worldOwned = new WeakMap();   // world -> { items: Map(ptr -> {obj, motion}), parts: [] }
+
+// Register a collision shape as owned by `world`. Shapes that outlive any one
+// world (the shared ball sphere) are deliberately NOT tracked — see balls.logic.
+export function trackShape(world, shape) {
+  const owned = worldOwned.get(world);
+  if (owned && !owned.items.has(shape.ptr)) owned.items.set(shape.ptr, { obj: shape, motion: null });
+  return shape;
 }
 
 // Create a fresh, independent dynamics world (one per room). Same solver
@@ -68,28 +103,76 @@ export function createWorld() {
   const broadphase = new AmmoLib.btDbvtBroadphase();
   const solver = new AmmoLib.btSequentialImpulseConstraintSolver();
   const world = new AmmoLib.btDiscreteDynamicsWorld(dispatcher, broadphase, solver, config);
-  world.setGravity(new AmmoLib.btVector3(0, -g, 0));
+  const gravity = new AmmoLib.btVector3(0, -g, 0);
+  world.setGravity(gravity);
+  AmmoLib.destroy(gravity);          // copied into the world by value
   const si = world.getSolverInfo();
   if (si.set_m_numIterations) si.set_m_numIterations(24);
   if (si.set_m_splitImpulse) si.set_m_splitImpulse(true);
   if (si.set_m_splitImpulsePenetrationThreshold) si.set_m_splitImpulsePenetrationThreshold(-0.02);
   si.set_m_restitutionVelocityThreshold(0);
   world.getDispatchInfo().set_m_allowedCcdPenetration(0);
+  // `parts` is already in teardown order: the world is torn down first, then
+  // the pieces it was built from, solver-last-built to config-first-built.
+  worldOwned.set(world, { items: new Map(), parts: [solver, broadphase, dispatcher, config] });
   return world;
 }
 
+// Free a body and everything that came with it. Use this wherever a body stops
+// being part of the game — a rack being replaced, a pocketed ball being cleared
+// — because removeRigidBody only unlinks it from the world; the body itself
+// stays in the Ammo heap until it is destroyed.
+export function destroyRigidBody(world, body) {
+  world.removeRigidBody(body);
+  const owned = worldOwned.get(world);
+  const rec = owned && owned.items.get(body.ptr);
+  if (owned) owned.items.delete(body.ptr);       // ptr must be read before the destroy
+  AmmoLib.destroy(body);
+  if (rec && rec.motion) AmmoLib.destroy(rec.motion);
+}
+
+// Tear a world down completely. Idempotent: a world destroyed twice (a room
+// disposed on both a disconnect and a timeout) does nothing the second time.
+export function destroyWorld(world) {
+  const owned = worldOwned.get(world);
+  if (!owned) return;
+  worldOwned.delete(world);
+  // Reverse creation order. Bodies must leave the world before they are freed;
+  // shapes tolerate any order among themselves, since a compound does not own
+  // its children and a mesh shape does not own its mesh interface. A record
+  // with a motion state is a body — nothing else has one.
+  const items = [...owned.items.values()].reverse();
+  for (const { obj, motion } of items) {
+    if (motion) {
+      world.removeRigidBody(obj);
+      AmmoLib.destroy(obj);
+      AmmoLib.destroy(motion);
+    } else {
+      AmmoLib.destroy(obj);
+    }
+  }
+  owned.items.clear();
+  AmmoLib.destroy(world);
+  for (const p of owned.parts) AmmoLib.destroy(p);
+}
+
 export function createRigidBody(world, { mass, shape, pos, quat, fric, rest, rollF=0, spinF=0, linD=0, angD=0, group, mask }) {
-  const t = new AmmoLib.btTransform();
-  t.setIdentity();
-  t.setOrigin(new AmmoLib.btVector3(pos.x, pos.y, pos.z));
-  t.setRotation(new AmmoLib.btQuaternion(quat.x, quat.y, quat.z, quat.w));
-  const motion = new AmmoLib.btDefaultMotionState(t);
+  rbTr.setIdentity();
+  rbVec.setValue(pos.x, pos.y, pos.z);
+  rbTr.setOrigin(rbVec);
+  rbQuat.setValue(quat.x, quat.y, quat.z, quat.w);
+  rbTr.setRotation(rbQuat);
+  // The one allocation here that is NOT scratch: the body keeps a pointer to
+  // its motion state, so it has to outlive this call. It is unreachable from JS
+  // afterwards, which is why the world's registry holds it alongside the body.
+  const motion = new AmmoLib.btDefaultMotionState(rbTr);
 
-  const localI = new AmmoLib.btVector3(0, 0, 0);
-  if (mass > 0) shape.calculateLocalInertia(mass, localI);
+  rbInertia.setValue(0, 0, 0);
+  if (mass > 0) shape.calculateLocalInertia(mass, rbInertia);
 
-  const rbInfo = new AmmoLib.btRigidBodyConstructionInfo(mass, motion, shape, localI);
+  const rbInfo = new AmmoLib.btRigidBodyConstructionInfo(mass, motion, shape, rbInertia);
   const body = new AmmoLib.btRigidBody(rbInfo);
+  AmmoLib.destroy(rbInfo);           // the body copied out everything it needs
   body.setFriction(fric);
   body.setRestitution(rest);
   if (body.setRollingFriction)  body.setRollingFriction(0);
@@ -100,6 +183,8 @@ export function createRigidBody(world, { mass, shape, pos, quat, fric, rest, rol
   } else {
     world.addRigidBody(body);
   }
+  const owned = worldOwned.get(world);
+  if (owned) owned.items.set(body.ptr, { obj: body, motion });
   return body;
 }
 
