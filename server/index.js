@@ -75,9 +75,13 @@ const RECONNECT_GRACE_MS = 45_000;
 // its own copy is dropped when it re-enters the rack.
 //
 // So the whole rack is kept while it is being played, not a recent window. That
-// is not free: recordings run ~166 KB of JSON each (a break can hit 775 KB), so
-// a full 21-shot rack is ~3.4 MB per room. The cap bounds the pathological case
-// rather than the normal one — a rack that reaches it has bigger problems.
+// is not free, and it is the largest thing a room holds now that the Ammo side
+// is disposed properly: measured over real racks, a recording averages ~254 KB
+// of JSON and a hard break hits ~545 KB, so a normal 20-shot rack is ~5 MB per
+// room and the cap is ~15 MB. (An earlier note here budgeted 166 KB and 3.4 MB;
+// both were low.) The cap bounds the pathological case rather than the normal
+// one — a rack that reaches it has bigger problems — so the number to watch is
+// rooms × 5 MB, not the cap.
 const MAX_SHOT_LOG = 60;
 // Padding on the replay gate (see replayLocked). Absorbs the gap between the
 // server predicting how long a client takes to watch a shot and how long it
@@ -409,7 +413,7 @@ function resumeSeat(conn, room, seatIndex, lastShot) {
   }
 
   emitTo(opponentOf(conn), 'opponentState', { connected: true, secondsLeft: 0 });
-  trimShotLog(room);   // everyone back → shrink to the recent window
+  trimShotLog(room);   // re-apply the cap; the window is the same one as always
 }
 
 // ---- Connection handling ----------------------------------------------------

@@ -59,6 +59,11 @@ let rbTr, rbVec, rbQuat, rbInertia;
 // Load the Ammo runtime once. In the browser `Ammo` is the global from the
 // <script> tag; in Node the server sets globalThis.Ammo before calling this.
 export async function initPhysics() {
+  // Idempotent. A second run would stand up a whole second Ammo runtime — its
+  // own multi-megabyte heap — and orphan the scratch objects below, so callers
+  // have always been told to run it once. Enforce it here rather than trusting
+  // that, now that the scratch is load-bearing.
+  if (AmmoLib) return { AmmoLib, tmpTransform, tmpVec3 };
   AmmoLib = await Ammo();
   tmpTransform = new AmmoLib.btTransform();
   tmpVec3 = new AmmoLib.btVector3(0, 0, 0);
